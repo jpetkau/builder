@@ -1,0 +1,125 @@
+TODO:
+- class DirStore: exports a filesystem tree with a Store interface.
+  (Simple; just create the FS node and map from hashes->nodes)
+- make a simple local store web service
+- Think about how to secure it. (Gets are somewhat safe anyway, since
+  yuo need to know the hash to fetch.)
+----------------------------
+Types:
+  tree
+  blob
+  symlink
+  executable blob
+
+This is close enough to Git's representation that it makes sense
+to use a compatible hashing scheme.
+
+Trees are represented as a list of tuples:
+ mode, name, hash
+ modes are numeric, the same as git
+
+Types:
+  nodes
+    nodetype - 'blob' or 'tree'
+    mode - git-compatible numeric mode
+    name 
+    hash = ...
+    fs or store - if this is a filesysem or store-based node
+  Filesystem
+    represents a filesystem. Can return n
+    node(path)
+
+  Store
+
+
+Filetree:
+Represents a content-hashed directory tree on the local filesystem.
+Caches hashes in an mdb database for quick checks.
+
+Operations:
+- create a tree view of local filesystem
+- push changes to an object store
+- pull a tree from an object store, syncing the local filesystem
+
+Store properties:
+- there are different ways I could do it.
+  1. push_tree and push_blob are basic operations. push_tree requires
+     that subobjects be in place first, or it fails.
+
+  2. push_blob pushes both tree and blob contents, in any order.
+     'check_tree' is a separate operation that parses a blob as
+     a tree, recursively, and reports what components are missing.
+
+Initially at least I'd like to implement on top of a dumb store.
+Implementing #2 that way would require a separate cache for what
+is a valid tree, which effectively turns it into #1 anyway. (?)
+
+blob: "content XXX is Z"
+
+---------------
+
+Tracking whether a tree is complete:
+- "have complete tree" is simply a separate fact to store
+- other possibly-useful facts:
+    "x is a subset of y"
+    "have complete slice of tree"
+    etc
+
+How do we store a record of complete trees?
+- existence of a treeblob?
+- database?
+- for each incomplete tree node, a list of possibly-missing children?
+  - which then needs to be udpated when children are added?
+  - this gets kind of ugly.
+
+Facts:
+    "compiling C in environment E produces X+Y"
+    - totally reasonable to store only part of X and Y here.
+
+    "hash(A++B++C++D) == hash(E)  [so A++B++C++D == E]"
+
+Derived facts:
+  if pred1(name) -> pred2(name)
+  AND have_all(tree, pred2)
+  THEN have_all(tree, pred1)
+
+----------------------------------------------------------------------
+
+Need for build system:
+- send tree
+- build of tree X produces Y
+
+Useful functions:
+- subset of tree
+- tree1 over tree2
+- tree1 changes since tree2
+
+
+build():
+  - read config file
+  - hash directories specified by config
+    - directory specs can give root and inclusion/exclusion lists
+
+
+---- build config ----
+buildconfig(
+  source = [
+    'ThirdParty/boost1_40etc',
+    'ThirdParty/curl3.07',
+    'Thunderbird/Client',
+    'toolchains/android_foo_bar'
+    'tools'
+  ],
+  intermediate = [
+    'Thunderbird/Client'
+  ],
+  output = [
+    'build'
+  ],
+  buildsteps = [
+    'tools/build/scripts/build_foo36.sh'
+  ]
+)
+
+----------------------------------------------------------------------
+
