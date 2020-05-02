@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 import contextlib
 
+config = {}
+
+
+def init_config(cfg):
+    config.clear()
+    config.update(cfg)
+
+
 # _opts is a simple flat dictionary of contextual options
 # clever nesting etc. left for someday
-_opts = {
-}
+_opts = {}
+
 
 def init_options(**kwargs):
     assert not _opts
     _opts = kwargs
+
 
 @contextlib.contextmanager
 def options(**kwargs):
     global _opts
     old_opts = _opts
     new_opts = old_opts.copy()
-    new_opts.update(old_opts)
+    new_opts.update(kwargs)
     _opts = new_opts
     try:
         yield
@@ -26,7 +35,9 @@ def options(**kwargs):
 class Opt:
     def __getattr__(self, name):
         return _opts[name]
+
     def __getitem__(self, name):
         return _opts[name]
 
-opt=Opt()
+
+opt = Opt()

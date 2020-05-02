@@ -105,7 +105,7 @@ def memoize(f, sig_value=None):
 
     @util.wraps(f)
     def wrapper(*args, **kwargs):
-        arg_sig = sig.of((f_sig, args, kwargs))
+        arg_sig = sig.of((sig.WithSig(f_sig), args, kwargs))
         res_sig = _memo_store.get(arg_sig, None)
         logger.debug("in memo for %s, arg_sig=%s, res_sig=%s", f, arg_sig, res_sig)
         if res_sig is None:

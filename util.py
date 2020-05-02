@@ -2,6 +2,7 @@
 from functools import wraps
 import sys
 
+
 def decorator(d):
     """
     Helper for writing decorators with optional args. These are
@@ -20,19 +21,23 @@ def decorator(d):
         @my_decorator(arg2="hi")
         def foo(): ... # ok
     """
+
     @wraps(d)
     def d_wrapper(*args, **kwargs):
-        if len(args)==1 and not kwargs and callable(args[0]):
+        if len(args) == 1 and not kwargs and callable(args[0]):
             return d(args[0])
         else:
+
             def partial(f):
                 return d(f, *args, **kwargs)
+
             return partial
+
     return d_wrapper
 
 
 @decorator
-def lazy_attr(f, name=""):
+def lazy_attr(f, name="", missing=object()):
     """
     Decorator to indicate that an attribute should be computed just
     once and cached (in memory) under the given name.
@@ -43,14 +48,15 @@ def lazy_attr(f, name=""):
     If no name is given, it will be the function name suffixed with '_'.
     """
     name = name or "_memo_" + f.__name__
+
     @wraps(f)
     def wrapper(self):
-        try:
-            return getattr(self, name)
-        except AttributeError:
+        v = getattr(self, name, missing)
+        if v is missing:
             v = f(self)
             setattr(self, name, v)
-            return v
+        return v
+
     return wrapper
 
 
@@ -58,10 +64,11 @@ def lazy_attr(f, name=""):
 class Struct:
     def __init__(self, **data):
         self.__dict__.update(data)
+
     def __repr__(self):
-        return "".join("Struct(",
-            *(f"{k}={v!r}" for (k,v) in self.__dict__.items()),
-            ")")
+        return "".join(
+            "Struct(", *(f"{k}={v!r}" for (k, v) in self.__dict__.items()), ")"
+        )
 
 
 def trace(f):
@@ -71,4 +78,5 @@ def trace(f):
         out = f(*args, **kwargs)
         print(f"LEAVING {f.__name__}{args} **{kwargs} out={out!r}", file=sys.stderr)
         return out
+
     return wrapper

@@ -20,7 +20,7 @@ class LazyAttrs:
 
 class LazyAttrTest(unittest.TestCase):
     def test_lazy_attr(self):
-        o = Oncer(1)
+        o = LazyAttrs(1)
         assert not hasattr(o, "_spam")
         assert not hasattr(o, "_memo_p")
         self.assertEqual(o.m(), 1)

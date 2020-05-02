@@ -35,7 +35,9 @@ class MemoTest(unittest.TestCase):
         self.assertEqual(f3(), 20)
         self.assertEqual(f4(), 25)
 
+
 if __name__ == "__main__":
     import logging
-    #logging.basicConfig(level=logging.DEBUG)
+
+    # logging.basicConfig(level=logging.DEBUG)
     unittest.main()

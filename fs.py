@@ -88,19 +88,43 @@ next run
 Also:
 - path relative to some root can be just a pair (Tree, relpath). Possibly with
   a class for convenience, but don't need new semantics.
+
+
+Mutable folders
+---------------
+
+Suppose we have some tools that run in three steps, each of which wants to mutate
+all over a folder tree?
+
+- could have part of the fs marked for mutable ops. Blobs and Trees never point
+  into there; you can construct them but they immediately copy data out.
+
+- or same thing, but defer the copy until we're about to do some possibly-mutating
+  operation.
+
+[If we always copy output blobs from gen folders to a more stable cache,
+it might not be that expensive anyway, since only blobs we've never seen before get
+copied. So the mutable-fs case is just disabling one optimization we might be doing.]
+
 """
 import shutil
 import util
 import enum
 import memo
 import posixpath
+import sig
+import os
+import context
+
+
+__ALLOW_GLOBAL_REFS__ = True
 
 
 class Root(enum.Enum):
     ABS = "abs"  # An absolute path outside of the build tree
-    SRC = "src_root"  # A path from the source root
-    GEN = "gen_root"  # A path from the generated files root
+    GEN = "gen_root"  # A path from the generated intermediate files root
     OUT = "out_root"  # A path from the output root
+    SRC = "src_root"  # A path from the source root
 
 
 class Path:
@@ -130,15 +154,30 @@ class Path:
 
     def __fspath__(self):
         """Implement the os.PathLike interface"""
-        if self.root is Root.ABS:
+        if self._root is Root.ABS:
             return os.path.normpath(self._rel)
         else:
             return os.path.join(
-                context.opt[self._root.value], os.path.normpath(self._rel)
+                context.config[self._root.value], os.path.normpath(self._rel)
             )
+
+    def __repr__(self):
+        return f"{{{self._root.value}}}/{self._rel}"
 
     def __truediv__(self, rel):
         return Path(self._root, posixpath.normpath(posixpath.join(self._rel, rel)))
+
+    def __eq__(self, other):
+        if self is other:
+            return True
+        return (
+            type(self) == type(other)
+            and self._root is other._root
+            and self._rel == other._rel
+        )
+
+    def __hash__(self):
+        return hash((type(self), self._root, self._rel))
 
     @memo.memoize
     def blob(self):
@@ -153,19 +192,33 @@ class Path:
         else:
             return None
 
+    def is_file(self):
+        return os.path.isfile(self)
+
+    def is_dir(self):
+        return os.path.isdir(self)
+
+
 abs_root = Path(Root.ABS, "/")
 gen_root = Path(Root.GEN, "")
+out_root = Path(Root.OUT, "")
 src_root = Path(Root.SRC, "")
+
+
+def blob_dir(content_sig):
+    s = content_sig.hash.hex()
+    return Path(Root.GEN, "blob") / s[:2] / s[2:]
+
 
 def output_dir():
     h = context.opt.current_call_hash
-    s = str(h)
+    s = str(h.hash.hex())
     return Path(Root.GEN, "memo") / s[:2] / s[2:]
 
 
 def make_output_dir():
     p = output_dir(h)
-    os.path.makedirs(p, parents=True, ok_exists=True)
+    os.path.makedirs(p, exist_ok=True)
     return p
 
 
@@ -179,38 +232,71 @@ def tree_from_path(path):
     return Tree({name: os.path.join(path, name) for name in names})
 
 
+def checkFileSig(path, expected):
+    h = sig.hash_file_contents(path)
+    if h != expected:
+        raise RuntimeError(f"hash mismatch in file {path}")
+    return expected
+
+
 class Blob:
     """
     Represents a blob of bytes which may be materialized on disk
     somewhere, but the location is not relevant to consumers.
+
+    A blob that is construct from a path will remember the path
+
     """
-    def __init__(self, *, path=None, bytes_sig=None, bytes=None):
-        if path is None and sig is None and bytes is None:
+
+    def __init__(self, *, path=None, content_sig=None, bytes=None):
+        if path is None and content_sig is None and bytes is None:
             raise ValueError("Blob requires, path, sig, or bytes")
         if bytes:
-            _byte_sig = sig.of(bytes)
+            if content_sig:
+                assert content_sig == sig.of(bytes)
+            else:
+                content_sig = sig.of(bytes)
         if path:
-            # if we're given both a path and a 
-            self._path = path
-        if sig and path:
-            checkFileSig(path, self.__sig__)
+            if content_sig:
+                assert content_sig == sig.hash_file_contents(path)
+            else:
+                content_sig = sig.hash_file_contents(path)
+        self._bytes = bytes
+        self._path = path
+        self._content_sig = content_sig
 
-    @util.lazy_attr("_path")
+    def __ser__(self):
+        return self._content_sig.hash
+
+    @classmethod
+    def __deser__(cls, cshash):
+        return cls(content_sig=sig.Sig(hash=0))
+
     def path(self):
-        if self._byte_sig:
-            path = gen_root() / "blob" / sig.of(self._byte_sig)
+        if self._path:
+            return self._path
+
+        self._path = self._content_sig.get_path()
+        if self._path:
+            return self._path
+
+        path = blob_dir(self._content_sig)
         if path.is_file():
-            return checkFileSig(path, self.__sig__)
-        if self._bytes:
-            with open(path, "wb") as f:
-                f.write(self._bytes)
+            assert self._content_sig == sig.hash_file_contents(path)
+            self._path = path
             return path
-        # TODO:
-        # if we have the signature of a bytes object, we should
-        # be able to get it from the main cache without copying,
-        # and shouldn't have to do extra caching here.
-        # i.e. "blob" should be a special cache of some sort
-        # circular dep is unfortunate
+        data = self._bytes or self._content_sig.object()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def bytes(self):
+        return self._content_sig.object()
+
+    def __fspath__(self):
+        return self.path().__fspath__()
+
 
 class Tree:
     def __init__(self, entries=None, path=None):
@@ -223,10 +309,9 @@ class Tree:
                 assert type(v) in (Blob, Tree)
                 # TODO: valid path if also provided
         self._entries = entries
-        if path:
-            self._path = path
+        self._path = path
 
-    @util.lazy_attr("_path")
+    @util.lazy_attr("_path", None)
     def materialize(self):
         """
         Return path to root of this tree on-disk.
