@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+
+
 class _Partial:
     def __init__(self, access_set):
         assert type(access_set) in (set, frozenset)
