@@ -104,8 +104,8 @@ Problem:
                 Y = cas.sig(Y, {k: fs(k) for k in ks.left})
 
 
-Efficiency of yonda thing
-=========================
+Efficiency of Yoneda thing
+==========================
 Problem:
 
 1000 files divided into 10 dirs of 100 files.
