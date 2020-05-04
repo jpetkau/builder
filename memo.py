@@ -77,7 +77,7 @@ Python statements can force a value early:
     list(x for x in thing) -- only works if we wrap 'list', which may be a bad idea
     List(x for x in thing) -- this works
 """
-import sig
+import cas
 import context
 import logging
 import util
@@ -90,8 +90,12 @@ _memo_store = {}
 # get memoized value without calling f
 # raises KeyError if there is no memoized value
 def get(f, *args, **kwargs):
-    arg_sig = sig.of((f, args, kwargs))
+    arg_sig = cas.sig((f, args, kwargs))
     return _memo_store[arg_sig].object()
+
+
+def record_access(*key):
+    _access_list.append(key)
 
 
 @util.decorator
@@ -101,23 +105,23 @@ def memoize(f, sig_value=None):
 
     sig_value, if not None, is a fixed Sig to use for f itself.
     """
-    f_sig = sig_value or sig.of(f)
+    f_sig = sig_value or cas.sig(f)
 
     @util.wraps(f)
     def wrapper(*args, **kwargs):
-        arg_sig = sig.of((sig.WithSig(f_sig), args, kwargs))
+        arg_sig = cas.sig((cas.WithSig(f_sig), args, kwargs))
         res_sig = _memo_store.get(arg_sig, None)
         logger.debug("in memo for %s, arg_sig=%s, res_sig=%s", f, arg_sig, res_sig)
         if res_sig is None:
             with context.options(current_call_hash=arg_sig):
                 v = f(*args, **kwargs)
-            vs = sig.of(v)
+            vs = cas.store(v)
             _memo_store[arg_sig] = vs
             logger.debug("_memo_store[%s] = %s", arg_sig, vs)
             return v
         else:
             return res_sig.object()
 
-    assert sig_value is None or isinstance(sig_value, sig.Sig)
-    wrapper.__sig__ = sig_value or sig.of(f)
+    assert sig_value is None or isinstance(sig_value, cas.Sig)
+    wrapper.__sig__ = sig_value or cas.sig(f)
     return wrapper

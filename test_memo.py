@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import unittest
-import sig
+import cas
 import memo
 
 
@@ -16,7 +16,7 @@ def f2():
 
 
 # lie about f3's hash
-@memo.memoize(sig_value=sig.of(f2))
+@memo.memoize(sig_value=cas.sig(f2))
 def f3():
     return 30
 
@@ -28,7 +28,7 @@ def f4():
 
 class MemoTest(unittest.TestCase):
     def test_memo(self):
-        self.assertEqual(sig.of(f2), sig.of(f3))
+        self.assertEqual(cas.sig(f2), cas.sig(f3))
         self.assertEqual(f1(10), 10)
         self.assertEqual(memo.get(f1.__wrapped__, 10), 10)
         self.assertEqual(f2(), 20)

@@ -1,23 +1,15 @@
 """
-Hashed objects
-==============
+Content addressable store
+=========================
 
 ("Sig" / "signature" used because the name "hash" is a Python builtin.)
 
 This implements a content-addressable object store.
 
-Currently it is strict; a lazy store seems worthwhile but that isn't what this is.
-
-It is possible to partially force values. For example, if you have a pair (a,b),
-you might want to force just 'a'.
-
-For 'blobs' types, the hash is an actual hash of the bits. For types which can be
-serialied to/from a blob, the hash is the blob hash plus some type name.
-
-Three kinds of errors:
-1. "internal" errors, e.g. syntax error in C++ code. These are cached like anything else.
-2. "external" errors, e.g. some tool had a transient failure. These propagate up but don't cache.
-3. panics: build system itself had an error and can't continue.
+For 'blobs' types, the hash is an actual hash of the bits. For all other
+types, the hash is made by converting the object to a state tuple
+`(type, obj1, obj2, ...)`, concatenating the hashes of all the subobjects,
+and hashing that.
 
 Can we have values which we know the hash for, but not the rest?
 - Yes: that's how e.g. memoized outputs are represented
@@ -25,12 +17,34 @@ Can we have values which we know the hash for, but not the rest?
 - We could flag values in the cache as, "parts known to exist" / "parts may be missing / parts known to be missing".
 - Anyway for now, assume it's an error if parts are missing.
 
+
+To fix
+------
+Right now this doesn't actually distinguish hashing from serialization.
+If you hash something, you can use that handle to get the object back.
+That ain't right! Often we know we are *aren't* going to want the object
+back.
+
+Fairly easy fix in principle, just have separate sig() and store() methods.
+Possibly inefficient in practice since we'd often end up doing both?
+
+
+Mutable objects
+---------------
+It would be really nice if we could reliably ensure immutability.
+Unfortunately Python makes this hard.
+
+Basically just try not to mutate hashed things or you will be sad.
+
+
 Encoding types in hashed values
 -------------------------------
 This is basically the same serializtion problem we have with e.g. pickle().
 How do we name types? What does it mean for a type to be the same?
-- At least for v1: like pickle, have a limited set of primitives with fixed
-  encoding, and compound types have a constructor from these.
+
+- If the type field deserializes to bytes, it represents a builtin.
+  b"i" for int, b"s" for str, etc.
+
 - Maybe even use pickle's special methods
 
 Hashing function objects
@@ -89,6 +103,10 @@ You must write your code as if objects never have identity.
 - Possible way to enforce this: since we're hashing lists on function
   entry to check memoization, could also intern a canonical instance at
   that time? But Python's weak refs are dumb so might be hard.
+
+Ah don't want to do that anyway. It's too hard to avoid mutating things
+in python, will be constant source of bugs. Just have to do extra hashing
+on mutable types. Wait for non-Python version for efficiency.
 
 Limitations
 -----------
@@ -163,7 +181,7 @@ _prevent_gc = []
 _id_to_sig = {}
 
 
-def _memo_sig(obj, sig):
+def _cache_sig(obj, sig):
     if id(obj) in _id_to_sig:
         assert _id_to_sig[id(obj)] == sig
     else:
@@ -175,8 +193,6 @@ def _memo_sig(obj, sig):
 class Sig:
     """
     The content hash of some object.
-
-    This is just a dumb dataclass to help avoid confusion with `bytes`
     """
 
     __slots__ = ("hash",)
@@ -210,7 +226,7 @@ class Sig:
         Find an object from its hash
         """
         bits = self._get_bits()
-        if self._is_bytes():
+        if self.is_bytes():
             return bits
 
         sub_objs = [h.object() for h in hsplit(bits)]
@@ -222,7 +238,7 @@ class Sig:
         else:
             return deser_instance(*sub_objs)
 
-    def _is_bytes(self):
+    def is_bytes(self):
         return (self.hash[0] & HFLAG_COMPOUND) == 0
 
     def _get_bits(self):
@@ -250,29 +266,31 @@ class Sig:
         Returns None if the contents are not available in a file (e.g.
         they're stored in a DB or memory or whatever.)
         """
-        assert self._is_bytes()
+        assert self.is_bytes()
         return None
 
 
 class WithSig:
     """
-    A class which hashes as the given signature.
+    A class which hashes as the given signature:
 
-        sig.of(WithSig(sig.of(x))) == sig.of(x)
+        sig(WithSig(sig(x))) == sig(x)
 
     This is used when you have the signature of some object, but want it
-    to hash as of it were the object itself, withou having to produce the
+    to hash as of it were the object itself, without having to produce the
     object itself.
     """
-
     __slots__ = ("__sig__",)
 
     def __init__(self, sig):
         self.__sig__ = sig
 
 
+def store(x):
+    return sig(x, store=True)
+
 # @util.trace
-def of(x):
+def sig(x, store=False):
     """
     Return the signature of some Python object
     """
@@ -292,14 +310,14 @@ def of(x):
         if type(parts) is bytes:
             parts = (parts,)
         assert type(parts) is tuple
-        b, h = _hcat(of(key), *[of(p) for p in parts])
+        b, h = _hcat(sig(key, store), *[sig(p, store) for p in parts])
 
-    if h.hash[0] & HFLAG_LONG:
+    if store and (h.hash[0] & HFLAG_LONG):
         _hash_store[h.hash] = b
 
     # remember hash for faster access later
-    # would be nice to detect mutations
-    _memo_sig(x, h)
+    # this might be a bad idea since we can't detect mutations
+    _cache_sig(x, h)
     return h
 
 
@@ -409,7 +427,9 @@ def deser_tuple(*xs):
 
 
 def ser_dict(x):
-    return list(x.keys()), list(x.values())
+    # must sort so insertion order doesn't affect hash
+    keys = sorted(x.keys())
+    return keys, [x[k] for k in keys]
 
 
 def deser_dict(ks, vs):

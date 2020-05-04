@@ -112,7 +112,7 @@ import util
 import enum
 import memo
 import posixpath
-import sig
+import cas
 import os
 import context
 
@@ -233,7 +233,7 @@ def tree_from_path(path):
 
 
 def checkFileSig(path, expected):
-    h = sig.hash_file_contents(path)
+    h = cas.hash_file_contents(path)
     if h != expected:
         raise RuntimeError(f"hash mismatch in file {path}")
     return expected
@@ -241,58 +241,55 @@ def checkFileSig(path, expected):
 
 class Blob:
     """
-    Represents a blob of bytes which may be materialized on disk
-    somewhere, but the location is not relevant to consumers.
+    Represents a handle to some blob of bytes of unspecified location.
 
-    A blob that is construct from a path will remember the path
-
+    Implements __fspath__ so you can use it as a path in open() etc.
+    It will be materialized on disk if necessary for this.
     """
-
-    def __init__(self, *, path=None, content_sig=None, bytes=None):
-        if path is None and content_sig is None and bytes is None:
-            raise ValueError("Blob requires, path, sig, or bytes")
+    def __init__(self, bytes=None, *, content_sig=None):
         if bytes:
             if content_sig:
-                assert content_sig == sig.of(bytes)
+                assert content_sig == cas.sig(bytes)
             else:
-                content_sig = sig.of(bytes)
-        if path:
-            if content_sig:
-                assert content_sig == sig.hash_file_contents(path)
-            else:
-                content_sig = sig.hash_file_contents(path)
+                content_sig = cas.sig(bytes)
+        assert content_sig.is_bytes()
         self._bytes = bytes
-        self._path = path
-        self._content_sig = content_sig
+        self.content_sig = content_sig
 
     def __ser__(self):
-        return self._content_sig.hash
+        return self.content_sig.hash
 
     @classmethod
     def __deser__(cls, cshash):
-        return cls(content_sig=sig.Sig(hash=0))
+        return cls(content_sig=cas.Sig(hash=0))
 
+    @util.lazy_attr("_path", None)
     def path(self):
-        if self._path:
-            return self._path
-
-        self._path = self._content_sig.get_path()
-        if self._path:
-            return self._path
-
-        path = blob_dir(self._content_sig)
-        if path.is_file():
-            assert self._content_sig == sig.hash_file_contents(path)
-            self._path = path
+        path = self.content_sig.get_path()
+        if path:
             return path
-        data = self._bytes or self._content_sig.object()
+
+        path = blob_dir(self.content_sig)
+        if path.is_file():
+            assert self.content_sig == cas.hash_file_contents(path)
+            return path
+
+        data = self._bytes or self.content_sig.object()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(data)
         return path
 
+    @util.lazy_attr("_bytes", None)
     def bytes(self):
-        return self._content_sig.object()
+        return self.content_sig.object()
+
+    def __eq__(self, other):
+        if self is other:
+            return True
+        if type(self) != type(other):
+            return False
+        return self.content_sig == other.content_sig
 
     def __fspath__(self):
         return self.path().__fspath__()
@@ -324,7 +321,7 @@ class Tree:
         #       (once) before assuming it's correct. Try to
         #       recreate it if it's corrupt.
         h = hash.hash(self)
-        path = gen_root() / "tree" / sig.of(self)
+        path = gen_root() / "tree" / cas.sig(self)
         if os.path.exists(path):
             # assume it's valid
             return path

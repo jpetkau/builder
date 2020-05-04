@@ -1,9 +1,145 @@
 proper build system w/ python-like config? (No partial eval)
 
 - py functions are just normal functions
-- partial application via []
-- targets can't be just strings then
+- build tree is exactly ordinary call tree. Lots of memoization.
+- no magic laziness, but explicit laziness is ok
+- no magic parallelism, but explicit parallelism ok
 
+
+Minor improvements
+==================
+Borrow another bit from the hash to mark whether objects are deserializable
+or not? (bytes / serialized object / one-way hash).
+[Not critical but better to know sooner than later.]
+
+[Easy to compute, it's just the union of 'no-deser' bits on subobjects]
+
+Allow an existing git object store to be used for file backing, why not?
+- Need to either use git's algorithm for blobs, or keep an extra mapping.
+
+- Back hash store with sqlite or something
+
+Hmm: is there any reason to have 'Blob' separate from 'Sig(bytes)'?
+Seems like they're pretty much equivalent, both hashes of some bytes
+plus a convenient way to materialize them.
+
+...
+Could gain some efficiency via special hashing for set-like (unordered) objects.
+Especially if we can compute hash(a+b) from hash(a)+hash(b)
+Set: add #'s together mod (2^255-19)
+- but need to watch out for (re-hash) short byte hashes: easy to forge sums.
+- special 'ListHasher' keeps digest internally, allows incremental append
+- special 'SetHasher' allows incremental add/remove
+
+FS partial tracking magic
+=========================
+- won't always be able to do yoneda thing. Is there another way?
+
+  - just sort accesses. Prev logic: "one of the accesses must be first". New logic: "one of the accesses must be smallest." - no, not the same: the important part was that with the yoneda thing, the first access is unconditional on the rest, so we can store just the one and retrieve it deterministically.
+
+- not as pure but could do some hack to figure it out as necessary. E.g. store the full set for the first call; on next store, extract "first" set as
+
+    {k: k ∈ (s0.keys & s1.keys), s0[k] != s1[k]
+
+    Y0: hash of current call's args, excluding fs
+    y[Y0]: set of "first" accesses from Y0
+    Y1 = hash(Y0, y[Y0])
+    Y2 = hash(Y1, y[Y1])
+
+Or to prevent final result from depending on access order:
+
+    A0 = hash of call and args
+    Y0 = hash(A0, {})
+    y[Y0]: set of "first" accesses from Y0
+    S1 = S0 | y[Y0]
+    Y1 = hash(A0, f . S1)
+    S2 = S1 | y[Y1]
+    Y2 = hash(Y1, f . S2)
+
+Problem:
+- Y1 contains hash of some old fs subtree.
+- If we have to split S1 into S1a and S1b, then we need to find Y1a and Y1b too.
+- Could just not do it. We'll do some extra work if we go back, but it will eventually converge to the true order.
+
+    actual order: a,b,c,d
+    old memo:
+
+        memo(A, {}) -> Left{a,b,c,d}
+        memo(A, {a:A,b:B,c:C,d:D}) -> R
+
+    new memo: f(b)=B1, f(d)=D1, order=a,b,d -> R1
+
+        memo(A, {}) -> Left{a,b,d} # not sure about c yet
+        memo(A, {a:a,b:B,d:D}) -> Left{c}
+        memo(A, {a:a,b:B1,d:D1}) -> Right(R1)
+
+    problem:
+
+        how do we find hash of {a:A,b:B,d:D} when we don't have B or C any more?
+        can we do set magic?
+            hash({a:A,b:B,d:D}) = (h(a,A)+h(b,B)+h(d,D))
+            we have:
+                hA + hB + hC + hD
+                hA, (and useless hB1, hD1)
+            we need:
+                hA + hB + hC
+        no, so need to deser the actual list. Fortunately just hashes,
+        not contents.
+
+    ...
+    Nice to not depend on access order, but now we're getting
+    back increasingly large sets to check; have to check stuff
+    multiple times, not necessarily a win. Both otherwise we have
+    to rewrite a whole tree if we split near the root so need this way.
+
+    memo 1:
+        arghash -> access list | result
+        (arghash, f[access list] -> access list | result
+
+        def get_memo(Y, fs):  # Y = hash of call and args excluding fs
+            while True:
+                ks = y[Y]       # Either Right(result) or Left(points)
+                if ks.is_right():
+                    return Some(ks.right)
+                Y = cas.sig(Y, {k: fs(k) for k in ks.left})
+
+
+Efficiency of yonda thing
+=========================
+Problem:
+
+1000 files divided into 10 dirs of 100 files.
+100 libs, 10 per dir, each dependent on random subset of files in that dir
+Each lib depends directly on 0-2 other libs (topologically sortable)
+
+As I have it now, the top-level project depends on all the files. After we
+check it we have to check again for each sub-thing. (Maybe not *so* bad).
+
+- Not taking advantage of FS tree shape at all. (Sort of: if say the source fs we pass in is only a subtree, can do a memo on the complete tree in addition to subset.)
+
+Can we take advantage of the fs tree shape?
+1: pass around subtrees of the fs where possible, so normal memoization catches it as long as that subtree doesn't change.
+2: when we memo (f(x)->partial y), also do a version with y->y' where y' is the parent directory of y. (So instead of saying "access file a/b/c", it's saying "access files in a/b")
+
+Can we take advantage of the call tree shape?
+- partly happens automatically? If lib appears at 10 call paths from the root, after the first one is checked, the rest ...?
+
+    {a/x/1} {b/x/2} {a/y/3} {b/x/4} {b/y/5} -> R
+    {a/x} -/
+    {a/x} {b/x} {a/y/3} {b/y/5}
+    {a/x} {b/x} {a/y} {b/y/5}
+    {a/x} {b/x} {a/y} {b/y}
+    {a} {b/x} {b/y}
+    {a} {b}
+
+end up with N^2 nodes, no good
+- since we have the whole list, we can apply any compression we want to it
+(e.g. merge X nodes into a larger node)
+Anyway this seems solvable with more heuristics, but possibly it's not necessary.
+
+Layers
+======
+1. Hash-based serialization system so we can recovered stored values.
 
 Plan so far
 ===========
@@ -939,7 +1075,7 @@ Instead of whole Yoneda thing, what about just tree diffs?
             return real_tree is None
 
         if type(deps) is bytes:
-            return type(real_tree) is Blob and deps == sig.of(real_tree).value
+            return type(real_tree) is Blob and deps == cas.sig(real_tree).value
 
         assert isinstance(deps, dict)
         if type(real_tree) is not Tree:
@@ -962,7 +1098,7 @@ Instead of whole Yoneda thing, what about just tree diffs?
             return real_tree is None
         if type(deps) is bytes:
             # hash of a blob
-            return type(real_tree) is Blob and deps == sig.of(real_tree)
+            return type(real_tree) is Blob and deps == cas.sig(real_tree)
 
         assert type(deps) is TreeDep
         if type(real_tree) is not Tree:
