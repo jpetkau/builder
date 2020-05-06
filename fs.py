@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """
+TODO:
+- It will remain a pain using 'Path' objects instead of plain pathnames when defining commands to run. Maybe allow pathnames in more places, and check that they're in safe places before using?
+
 filesystem:
 
 * mapping from pure view to real FS is via a shim layer with aproppriate
@@ -107,14 +110,9 @@ it might not be that expensive anyway, since only blobs we've never seen before 
 copied. So the mutable-fs case is just disabling one optimization we might be doing.]
 
 """
-import shutil
-import util
-import enum
-import memo
-import posixpath
-import cas
-import os
-import context
+import enum, os, posixpath, secrets, shutil
+import cas, context, util
+from util import imdict
 
 
 __ALLOW_GLOBAL_REFS__ = True
@@ -123,28 +121,36 @@ __ALLOW_GLOBAL_REFS__ = True
 class Root(enum.Enum):
     ABS = "abs"  # An absolute path outside of the build tree
     GEN = "gen_root"  # A path from the generated intermediate files root
+    CAS = "cas_root"  # A path into the content-addressable store area
     OUT = "out_root"  # A path from the output root
     SRC = "src_root"  # A path from the source root
+
+    def __fspath__(self):
+        if self is Root.ABS:
+            return ""
+        else:
+            return os.path.normpath(context.config[self.value])
 
 
 class Path:
     """
-  Represents a location on disk, relative to some root.
-  *Which* root is chosen is part of the path's hash, but the location
-  of the root itself is not.
+    Represents a location on disk, relative to some root.
+    *Which* root is chosen is part of the path's hash, but the location
+    of the root itself is not.
 
-  The contents of the file referred to by the path (if any) are not
-  part of the hash.
+    The contents of the file referred to by the path (if any) are not
+    part of the hash.
 
-  root_dir:
-  - "abs": An absolute path outside of the build tree
-  - "src": a path from the source root
-  - "gen": a path from the build root
-  - "out": a path from the output root
-  """
+    root:
+    - "abs": An absolute path outside of the build tree
+    - "src": a path from the source root
+    - "gen": a path from the build root
+    - "out": a path from the output root
+    - a Tree object
+    """
 
     def __init__(self, root: Root, rel=""):
-        assert isinstance(root, Root)
+        assert isinstance(root, Root) or isinstance(root, Tree)
         if root is Root.ABS:
             assert posixpath.isabs(rel)
         else:
@@ -153,19 +159,25 @@ class Path:
         self._rel = rel
 
     def __fspath__(self):
-        """Implement the os.PathLike interface"""
-        if self._root is Root.ABS:
-            return os.path.normpath(self._rel)
-        else:
-            return os.path.join(
-                context.config[self._root.value], os.path.normpath(self._rel)
-            )
+        """
+        Implement the os.PathLike interface
+        """
+        return os.path.join(self._root, os.path.normpath(self._rel))
 
     def __repr__(self):
         return f"{{{self._root.value}}}/{self._rel}"
 
     def __truediv__(self, rel):
         return Path(self._root, posixpath.normpath(posixpath.join(self._rel, rel)))
+
+    def __ser__(self):
+        if self._root is Root.GEN:
+            raise RuleError("can't hash intermediate paths")
+        return (self._root, self._rel)
+
+    @classmethod
+    def __deser__(cls, root, rel):
+        return cls(root, rel)
 
     def __eq__(self, other):
         if self is other:
@@ -179,14 +191,13 @@ class Path:
     def __hash__(self):
         return hash((type(self), self._root, self._rel))
 
-    @memo.memoize
     def blob(self):
         """
-      Return a blob representing the contents of the file at this path,
-      or None if the file does not exist.
+        Return a blob representing the contents of the file at this path,
+        or None if the file does not exist.
 
-      It is an error to mutate the file once blob() has been called.
-      """
+        It is an error to mutate the file once blob() has been called.
+        """
         if os.path.exists(self):
             return Blob(path=self)
         else:
@@ -198,38 +209,60 @@ class Path:
     def is_dir(self):
         return os.path.isdir(self)
 
+    def remove(self):
+        """
+        Delete the file or tree at this path.
+        """
+        assert self.root in (Root.OUT, Root.GEN)
+        path = os.fspath(self)
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISDIR(st):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+
+    def basename(self):
+        return posixpath.basename(self._rel)
+
 
 abs_root = Path(Root.ABS, "/")
 gen_root = Path(Root.GEN, "")
+cas_root = Path(Root.CAS, "")
 out_root = Path(Root.OUT, "")
 src_root = Path(Root.SRC, "")
 
 
-def blob_dir(content_sig):
+def _cas_dir(kind, content_sig):
     s = content_sig.hash.hex()
-    return Path(Root.GEN, "blob") / s[:2] / s[2:]
-
-
-def output_dir():
-    h = context.opt.current_call_hash
-    s = str(h.hash.hex())
-    return Path(Root.GEN, "memo") / s[:2] / s[2:]
+    return cas_root / kind / s[:2] / s[2:]
 
 
 def make_output_dir():
-    p = output_dir(h)
-    os.path.makedirs(p, exist_ok=True)
-    return p
+    # Create a temporary directory for running a tool
+    # and return a path to it
+    while True:
+        h = secrets.token_hex(6)
+        parent = gen_root / h[:2]
+        p = parent / h[2:]
+        try:
+            os.makedirs(parent, exist_ok=True)
+            os.mkdir(p)
+        except FileExistsError:
+            continue
+        return p
 
 
 def tree_from_path(path):
-    path = os.fspath(path)
     if not os.path.exists(path):
         return None
     if not os.path.isdir(path):
-        return Blob(path)
+        return Blob(path=path)
     names = sorted(os.listdir(path))
-    return Tree({name: os.path.join(path, name) for name in names})
+    return Tree({name: tree_from_path(path / name) for name in names})
 
 
 def checkFileSig(path, expected):
@@ -246,8 +279,14 @@ class Blob:
     Implements __fspath__ so you can use it as a path in open() etc.
     It will be materialized on disk if necessary for this.
     """
-    def __init__(self, bytes=None, *, content_sig=None):
-        if bytes:
+
+    def __init__(self, *, path=None, bytes=None, content_sig=None):
+        if path:
+            assert bytes is None
+            assert path._root in (Root.GEN, Root.SRC, Root.ABS) or isinstance(path._root, Tree)
+            with open(path, "rb") as f:
+                bytes = f.read()
+        if bytes is not None:
             if content_sig:
                 assert content_sig == cas.sig(bytes)
             else:
@@ -269,7 +308,7 @@ class Blob:
         if path:
             return path
 
-        path = blob_dir(self.content_sig)
+        path = _cas_dir("blob", self.content_sig)
         if path.is_file():
             assert self.content_sig == cas.hash_file_contents(path)
             return path
@@ -279,6 +318,13 @@ class Blob:
         with open(path, "wb") as f:
             f.write(data)
         return path
+
+    def write_copy(self, path, clobber=True):
+        data = self._bytes or self.content_sig.object()
+        if clobber:
+            path.remove()
+        with open(path, "xb") as f:
+            f.write(data)
 
     @util.lazy_attr("_bytes", None)
     def bytes(self):
@@ -304,41 +350,72 @@ class Tree:
             for (k, v) in entries.items():
                 assert type(k) is str
                 assert type(v) in (Blob, Tree)
-                # TODO: valid path if also provided
-        self._entries = entries
-        self._path = path
+        self._entries = imdict(entries)
 
-    @util.lazy_attr("_path", None)
-    def materialize(self):
+    @util.lazy_attr("_fspath", None)
+    def __fspath__(self):
         """
         Return path to root of this tree on-disk.
         """
-        # TODO: This requires the whole tree to be in-memory.
-        #       We could allow leaves to be represented by
-        #       their signatures until needed.
-        #
         # TODO: If directory is already on disk, validate it
         #       (once) before assuming it's correct. Try to
         #       recreate it if it's corrupt.
-        h = hash.hash(self)
-        path = gen_root() / "tree" / cas.sig(self)
+        path = _cas_dir("tree", cas.sig(self))
         if os.path.exists(path):
             # assume it's valid
             return path
         else:
-            fsentries = {k: v.fspath() for (k, v) in self.entries.items()}
-            os.mkdir(fspath)
+            os.mkdir(path)
+            fsentries = {k: v.__fspath__() for (k, v) in self.entries.items()}
             try:
                 for k in self.entries:
-                    target_fspath = fsentries[k]
-                    isdir = isinstance(self.entries[k], Blob)
-                    # requires Python >=3.8 on Windows
-                    os.symlink(
-                        target_fspath,
-                        os.path.join(fspath, k),
-                        target_is_directory=isinstance(self.entries[k], Blob),
+                    util.makelink(
+                        fsentries[k], os.path.join(path, k),
                     )
             except:
                 shutil.rmtree(fspath, ignore_errors=True)
                 raise
             return fspath
+
+    def write_copy(self, path, *, clobber=True):
+        """
+        Write contents of this tree at the given path.
+
+        This is much more expensive than __fspath__(), because it always makes
+        a full copy.
+
+        If `clobber` is True, conflicting files at the path will be replaced. Non-
+        conflicting files will be left alone; call `path.remove()` first if you
+        really want to replace everything.
+        """
+        assert path.root in (Root.ABS, root.OUT, root.GEN)
+        try:
+            os.mkdir(path)
+        except FileExistsError:
+            if clobber and not stat.S_ISDIR(os.lstat(path)):
+                path.remove()
+                os.mkdir(path)
+        for (k, v) in self.entires.items():
+            (path / k).write_copy(v, clobber=clobber)
+        return path
+
+    def __truediv__(self, rel):
+        """
+        Get a path into this tree.
+        """
+        out = self
+        for part in rel.split("/"):
+            out = self._entries.get(part, None)
+        return out
+
+    def __getitem__(self, name):
+        """
+        Get a subtree of this tree.
+
+            tree / "foo" - relative path inside the same tree
+            tree["foo"] or tree.get("foo") - standalone subtree
+        """
+        return self._entries[name]
+
+    def get(self, name, default=None):
+        return self._entries.get(name, default)

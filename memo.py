@@ -99,21 +99,29 @@ def record_access(*key):
 
 
 @util.decorator
-def memoize(f, sig_value=None):
-    """
-    Mark a function as part of the heavyweight memo system
+class memoize:
+    def __init__(self, func, sig_value=None):
+        """
+        Mark a function as part of the heavyweight memo system
 
-    sig_value, if not None, is a fixed Sig to use for f itself.
-    """
-    f_sig = sig_value or cas.sig(f)
+        sig_value, if not None, is a fixed Sig to use for f itself.
+        """
+        self._func = func
+        self._sig = sig_value
 
-    @util.wraps(f)
-    def wrapper(*args, **kwargs):
-        arg_sig = cas.sig((cas.WithSig(f_sig), args, kwargs))
+    @property
+    @util.lazy_attr("_sig", None)
+    def __sig__(self):
+        return cas.sig(self._func)
+
+    def __call__(self, *args, **kwargs):
+        f = self._func
+        arg_sig = cas.sig((self, args, kwargs))
         res_sig = _memo_store.get(arg_sig, None)
         logger.debug("in memo for %s, arg_sig=%s, res_sig=%s", f, arg_sig, res_sig)
         if res_sig is None:
             with context.options(current_call_hash=arg_sig):
+                logger.warning(f"calling {f}")
                 v = f(*args, **kwargs)
             vs = cas.store(v)
             _memo_store[arg_sig] = vs
@@ -122,6 +130,43 @@ def memoize(f, sig_value=None):
         else:
             return res_sig.object()
 
-    assert sig_value is None or isinstance(sig_value, cas.Sig)
-    wrapper.__sig__ = sig_value or cas.sig(f)
-    return wrapper
+        assert sig_value is None or isinstance(sig_value, cas.Sig)
+        wrapper.__sig__ = sig_value or cas.sig(f)
+        return wrapper
+
+
+def trace_access(*accesses):
+    # keys are tuples of:
+    #   (func_obj, args, kwargs); kwargs is in args as an imdict, if needed
+    # func_obj is a distinct placeholder for the argument
+    # func_obj example: function takes two fs trees as input
+    #
+    assert isinstance(accesses, dict)
+    args = args - _all_access_set
+    _access_list.append(args)
+
+
+# example: function takes two source trees as input
+# how do we tell them apart? - has to be by arg position
+# def f(tree1, tree2):
+#    return int(tree1["a/b"]) + int(tree2["c/d"])
+
+
+# trace_access(f, (0, ("a/b",), {})
+# trace_access(f, (1, ("c/d",), {})
+
+"""
+How do we annotate parallel vs. sequential accesses?
+- for bad tools case, we mark everything parallel anyway and sort it out later.
+
+maybe just always do that? Otherwise we're introducing a lot of spurious dependencies.
+- yes: make the default parallel; have an explicit way to mark sequencing.
+
+Naming:
+- args named by position: int or string
+- but how can we tell? E.g. suppose we passed the same value for tree1 and tree2 above?
+- so need to wrap them at memo time.
+- which means memoizer needs to look at all the args. But it's doing that anyway so that's ok.
+
+And then globals just come pre-wrapped; key is string with a dot in it.
+"""

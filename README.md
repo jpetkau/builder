@@ -51,9 +51,13 @@ In roughly bottom-to-top order:
 
 `fs.py`: `pure` model of file system. Useful objects:
 
-    `Blob`: byte string at some unspecified location.
-    `Tree`: (fully hashed) tree of blobs and trees at some unspecified location.
+    `Blob`: immutable byte string at some unspecified location.
+    `Tree`: (fully hashed) immutable tree of blobs and trees at some unspecified location.
     `Path`: any path used during builds; need to use this instead of simple strings to get correct hashing.
+
+    Blob and Tree can be materialized in a few different ways:
+    - for read-only access where symlinks are ok, 
+    - if a tool needs read/write access or can't deal with symlinks, copies can be made.
 
 `y_memo.py`: incremental dependency tracking. Not working yet.
 
@@ -143,6 +147,20 @@ But the compiler just outputs an unordered bag of dependencies.
 
 We can address this by incrementally refining the memoized result if later
 calls record different dependencies.
+
+clang sucks slightly less; it has "-Xclang -dependency-dot" which can output
+almost the true deps. Except it doesn't output anything for *missing* deps that
+cause errors.
+
+Also none of them output anything for `__has_include()`, which makes the
+generated deps kinda useless.
+
+Also it would be nice to be smart about which #defines are relevant or not,
+so changing a define wouldn't cause a recompile if it was never used.
+This starts getting into a custom C++ preprocessor though. (Maybe that would
+be useful to ship as a standalone tool? Then it could be written in Rust
+and be fast and get support from other people who found it useful, and also
+maybe it already exists.)
 
 
 TODO: Minor improvements

@@ -124,7 +124,7 @@ class SigTest(unittest.TestCase):
         self.assertEqual(cas.sig(cas.Global("X", "Y")).hash, b"\x48\x43\x02G\x02X\x02Y")
 
     def test_dict_order(self):
-        self.assertEqual(cas.sig({1:2, 3:4}), cas.sig({3:4, 1:2}))
+        self.assertEqual(cas.sig({1: 2, 3: 4}), cas.sig({3: 4, 1: 2}))
 
     def test_fn_sig(self):
         self.assertEqual(cas.sig(get_hidden1()), cas.sig(get_hidden2()))

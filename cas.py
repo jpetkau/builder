@@ -169,6 +169,8 @@ import hashlib
 import util
 import sys
 import all_globals
+import logging
+
 
 _hash_store = {}
 
@@ -280,6 +282,7 @@ class WithSig:
     to hash as of it were the object itself, without having to produce the
     object itself.
     """
+
     __slots__ = ("__sig__",)
 
     def __init__(self, sig):
@@ -289,7 +292,8 @@ class WithSig:
 def store(x):
     return sig(x, store=True)
 
-# @util.trace
+
+#@util.trace
 def sig(x, store=False):
     """
     Return the signature of some Python object
@@ -434,7 +438,7 @@ def ser_dict(x):
 
 def deser_dict(ks, vs):
     assert len(ks) == len(vs)
-    return dict(zip(ks, vs))
+    return util.imdict(zip(ks, vs))
 
 
 def ser_sig(x):
@@ -453,6 +457,7 @@ The 'type' part will typically be found as a global for deser.
 
 
 def ser_instance(v):
+    assert not isinstance(v, types.ModuleType)
     return ser_dict(v.__dict__)
 
 
@@ -606,10 +611,12 @@ serializers = {
     list: (b"L", ser_list),
     tuple: (b"T", ser_tuple),
     dict: (b"D", ser_dict),
+    util.imdict: (b"D", ser_dict),
     Sig: (b"S", ser_sig),
     types.ModuleType: (b"M", ser_module),
     types.FunctionType: (b"F", ser_function),
     types.CodeType: (b"FC", ser_code),
+    logging.Logger: (b"", ser_unit),  # treat loggers as None
 }
 
 

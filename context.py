@@ -4,7 +4,7 @@ import contextlib
 config = {}
 
 
-def init_config(cfg):
+def init_config(**cfg):
     config.clear()
     config.update(cfg)
 
