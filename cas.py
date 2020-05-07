@@ -164,32 +164,28 @@ Python is stupid
 - could keep the objects alive, but occasionally scan for objects with refcount==1
 """
 from typing import List
-import types
-import hashlib
-import util
-import sys
-import all_globals
-import logging
+import dbm, hashlib, logging, os, sys, types
+import all_globals, context, util
 
 
-_hash_store = {}
+logger = logging.getLogger(__name__)
 
 HFLAG_LONG = 128
 HFLAG_COMPOUND = 64
 HFLAG_MASK = 63
 HASH_SIZE = 32
 
-_prevent_gc = []
-_id_to_sig = {}
+
+_hash_store = None
 
 
-def _cache_sig(obj, sig):
-    if id(obj) in _id_to_sig:
-        assert _id_to_sig[id(obj)] == sig
-    else:
-        _prevent_gc.append(obj)
-        _id_to_sig[id(obj)] = sig
-    return sig
+def hash_store():
+    global _hash_store
+    if _hash_store is None:
+        dir = context.config["cas_root"]
+        os.makedirs(dir, exist_ok=True)
+        _hash_store = dbm.open(os.path.join(dir, "cas_db"), "c")
+    return _hash_store
 
 
 class Sig:
@@ -243,6 +239,14 @@ class Sig:
     def is_bytes(self):
         return (self.hash[0] & HFLAG_COMPOUND) == 0
 
+    def is_short(self):
+        """
+        Return true for 'short' hashes, where the full serialization of
+        the object is smaller than a hash digest so we just call it the
+        hash.
+        """
+        return (self.hash[0] & HFLAG_LONG) != 0
+
     def _get_bits(self):
         """
         Get the uparsed bit string corresponding to a hash
@@ -252,7 +256,7 @@ class Sig:
         if n & HFLAG_LONG:
             # stored in cache
             assert len(h) == HASH_SIZE, h
-            return _hash_store[h]
+            return hash_store()[h]
         else:
             # short string is encoded in the hash itself
             n &= HFLAG_MASK
@@ -293,19 +297,20 @@ def store(x):
     return sig(x, store=True)
 
 
-#@util.trace
+# @util.trace
 def sig(x, store=False):
     """
     Return the signature of some Python object
     """
-    h = _id_to_sig.get(id(x), None)
-    if h:
-        return h
 
+    # reuse existing sig if possible
     try:
-        return x.__sig__
+        s = x.__sig__
     except AttributeError:
-        pass
+        s = None
+    else:
+        if s and (not store or s.is_short() or s.hash in hash_store()):
+            return s
 
     if type(x) is bytes:
         b, h = x, hash_bytes(x)
@@ -317,11 +322,9 @@ def sig(x, store=False):
         b, h = _hcat(sig(key, store), *[sig(p, store) for p in parts])
 
     if store and (h.hash[0] & HFLAG_LONG):
-        _hash_store[h.hash] = b
+        hash_store()[h.hash] = b
 
-    # remember hash for faster access later
-    # this might be a bad idea since we can't detect mutations
-    _cache_sig(x, h)
+    assert s is None or s == h
     return h
 
 

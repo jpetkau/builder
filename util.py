@@ -75,6 +75,9 @@ def trace(f):
         _trace_indent += 2
         try:
             out = f(*args, **kwargs)
+        except BaseException as e:
+            out = e
+            raise
         finally:
             _trace_indent -= 2
             print(
@@ -131,9 +134,9 @@ class Struct:
         self.__dict__.update(data)
 
     def __repr__(self):
-        return "".join([
-            "Struct(", *(f"{k}={v!r}" for (k, v) in self.__dict__.items()), ")"
-        ])
+        return "".join(
+            ["Struct(", *(f"{k}={v!r}" for (k, v) in self.__dict__.items()), ")"]
+        )
 
     def __len__(self):
         return len(self.__dict__)
@@ -143,6 +146,7 @@ class Struct:
 
     def keys(self):
         return self.__dict__.keys()
+
 
 if os.name == "nt" and sys.version_info <= (3, 8):
     # work around os.symlink() not working

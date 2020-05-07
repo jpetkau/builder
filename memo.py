@@ -77,21 +77,44 @@ Python statements can force a value early:
     list(x for x in thing) -- only works if we wrap 'list', which may be a bad idea
     List(x for x in thing) -- this works
 """
-import cas
-import context
-import logging
-import util
+import dbm, logging, os
+import cas, context, util
+
 
 logger = logging.getLogger(__name__)
 
-_memo_store = {}
+
+_memo_store = None
+
+
+def memo_store():
+    global _memo_store
+    if _memo_store is None:
+        dir = context.config["cas_root"]
+        os.makedirs(dir, exist_ok=True)
+        _memo_store = dbm.open(os.path.join(dir, "memo_db"), "c")
+    return _memo_store
+
+
+def put_memo(arg_sig, v_sig):
+    assert isinstance(arg_sig, cas.Sig)
+    assert isinstance(v_sig, cas.Sig)
+    logger.info("_memo_store[%s] = %s", arg_sig, v_sig)
+    memo_store()[arg_sig.hash] = v_sig.hash
+
+
+def get_memo(arg_sig):
+    h = memo_store().get(arg_sig.hash)
+    if h is None:
+        return None
+    return cas.Sig(hash=h)
 
 
 # get memoized value without calling f
 # raises KeyError if there is no memoized value
 def get(f, *args, **kwargs):
     arg_sig = cas.sig((f, args, kwargs))
-    return _memo_store[arg_sig].object()
+    return get_memo(arg_sig).object()
 
 
 def record_access(*key):
@@ -117,16 +140,17 @@ class memoize:
     def __call__(self, *args, **kwargs):
         f = self._func
         arg_sig = cas.sig((self, args, kwargs))
-        res_sig = _memo_store.get(arg_sig, None)
+        res_sig = get_memo(arg_sig)
         logger.debug("in memo for %s, arg_sig=%s, res_sig=%s", f, arg_sig, res_sig)
         if res_sig is None:
             with context.options(current_call_hash=arg_sig):
-                logger.warning(f"calling {f}")
-                v = f(*args, **kwargs)
-            vs = cas.store(v)
-            _memo_store[arg_sig] = vs
-            logger.debug("_memo_store[%s] = %s", arg_sig, vs)
-            return v
+                logger.info(
+                    f"memo calling {f}: no memo for sig {arg_sig} of {(self, args, kwargs)}"
+                )
+                res = f(*args, **kwargs)
+            res_sig = cas.store(res)
+            put_memo(arg_sig, res_sig)
+            return res
         else:
             return res_sig.object()
 

@@ -25,4 +25,6 @@ def lib2():
 
 
 def main():
-    return cxx.binary("main", srcs=[fs.src_root / "bin/main.cpp"], libs=[lib1(), lib2()])
+    return cxx.binary(
+        "main", srcs=[fs.src_root / "bin/main.cpp"], libs=[lib1(), lib2()]
+    )

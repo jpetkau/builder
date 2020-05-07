@@ -19,4 +19,6 @@ if __name__ == "__main__":
 
     import test_data.BUILD as b
 
-    print(b.main())
+    bin = b.main()
+
+    bin.tree.write_copy(fs.out_root, makedirs=True)
