@@ -110,9 +110,12 @@ it might not be that expensive anyway, since only blobs we've never seen before 
 copied. So the mutable-fs case is just disabling one optimization we might be doing.]
 
 """
-import enum, os, posixpath, secrets, shutil, stat
+import enum, logging, os, posixpath, secrets, shutil, stat
 import cas, context, util
 from util import imdict
+
+
+logger = logging.getLogger(__name__)
 
 
 __ALLOW_GLOBAL_REFS__ = True
@@ -124,6 +127,9 @@ class Root(enum.Enum):
     CAS = "cas_root"  # A path into the content-addressable store area
     OUT = "out_root"  # A path from the output root
     SRC = "src_root"  # A path from the source root
+
+    def __str__(self):
+        return f"{self.value}"
 
     def __fspath__(self):
         if self is Root.ABS:
@@ -165,10 +171,7 @@ class Path:
         return os.path.normpath(os.path.join(self.root, self._rel))
 
     def __repr__(self):
-        if isinstance(self.root, Root):
-            return f"{{{self.root.value}}}/{self._rel}"
-        else:
-            return f"{{{cas.sig(self.root)}}}/{self._rel}"
+        return f"{cas.sig(self.root)}/{self._rel}"
 
     def __truediv__(self, rel):
         if self.root is Root.ABS:
@@ -197,41 +200,33 @@ class Path:
     def __hash__(self):
         return hash((type(self), self.root, self._rel))
 
-    def blob(self, *, st_mode=None):
+    def tree(self, *, st=None):
         """
-        Return a blob representing the contents of the file at this path,
-        or None if the file does not exist.
+        Return a Tree (or Blob) representing the current contents of the filesystem
+        at this path.
 
-        It is an error to mutate the file once blob() has been called.
+        Raises FileNotFoundError if there is no file at this path.
 
-        st_mode is the file's mode bits, if known, to save a stat() call.
+        st is the file's stat_result, if already known, to save a stat() call.
         """
-        try:
-            with open(self, "rb") as f:
-                # TODO: don't read the whole thing into memory!
-                # need to cooperate with cas to move directly to/from blob store
-                bytes = f.read()
-        except FileNotFoundError:
-            return None
-        if st_mode is None:
-            st_mode = os.stat(self).st_mode
-        if st_mode & stat.S_IXUSR:
-            return XBlob(bytes=bytes)
+        if isinstance(self.root, Tree):
+            return self.root[self._rel]
+
+        if st is None:
+            st = os.stat(self)
+        if stat.S_ISDIR(st.st_mode):
+            entries = sorted(os.scandir(self), key=lambda p: p.name)
+            return Tree({e.name: (self / e.name).tree(st=e.stat()) for e in entries})
         else:
-            return Blob(bytes=bytes)
+            # this path points to a blob
+            sig = cas.store_file(self, st)
+            if st.st_mode & stat.S_IXUSR:
+                return XBlob(content_sig=sig)
+            else:
+                return Blob(content_sig=sig)
 
-    def tree(self, *, st_mode=None):
-        """
-        Return a Tree (or Blob) representing the contents of the data at this path
-        """
-        if st_mode is None:
-            st_mode = os.stat(self).st_mode
-        if not stat.S_ISDIR(st_mode):
-            return self.blob(st_mode=st_mode)
-        entries = sorted(os.scandir(self), key=lambda p: p.name)
-        return Tree(
-            {e.name: (self / e.name).tree(st_mode=e.stat().st_mode) for e in entries}
-        )
+    def exists(self):
+        return os.path.exists(self)
 
     def is_file(self):
         return os.path.isfile(self)
@@ -242,6 +237,8 @@ class Path:
     def remove(self):
         """
         Delete the file or tree at this path.
+
+        Only files under out_root and gen_root can be removed this way.
         """
         assert self.root in (Root.OUT, Root.GEN)
         path = os.fspath(self)
@@ -250,10 +247,7 @@ class Path:
         except FileNotFoundError:
             pass
         else:
-            if stat.S_ISDIR(st.st_mode):
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
+            _rmtree(path)
 
     def basename(self):
         return posixpath.basename(self._rel)
@@ -289,16 +283,9 @@ def make_output_dir():
         return p
 
 
-def checkFileSig(path, expected):
-    h = cas.hash_file_contents(path)
-    if h != expected:
-        raise RuntimeError(f"hash mismatch in file {path}")
-    return expected
-
-
 class Blob:
     """
-    Represents a handle to some blob of bytes of unspecified location.
+    Represents a handle to some blob of bytes as a pure value.
 
     Implements __fspath__ so you can use it as a path in open() etc.
     It will be materialized on disk if necessary for this.
@@ -332,27 +319,21 @@ class Blob:
 
     @util.lazy_attr("_path", None)
     def path(self):
-        path = self.content_sig.get_path()
-        if path:
-            return path
-
-        path = _cas_dir("blob", self.content_sig)
-        if path.is_file():
-            assert self.content_sig == cas.hash_file_contents(path)
-            return path
-
-        data = self._bytes or self.content_sig.object()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as f:
-            f.write(data)
+        path = Path(Root.CAS, self.content_sig.get_relpath(st_mode=self._mode))
+        if not path.exists():
+            self.write_copy(path, False)
         return path
 
-    def write_copy(self, path, clobber=True, mode=None):
+    def __fspath__(self):
+        return self.path().__fspath__()
+
+    def write_copy(self, path, clobber=True):
         data = self._bytes or self.content_sig.object()
         if clobber:
             path.remove()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "xb") as f:
-            os.chmod(path, mode or self._mode)
+            os.chmod(path, self._mode)
             f.write(data)
 
     @util.lazy_attr("_bytes", None)
@@ -365,9 +346,6 @@ class Blob:
         if type(self) != type(other):
             return False
         return self.content_sig == other.content_sig
-
-    def __fspath__(self):
-        return self.path().__fspath__()
 
 
 class XBlob(Blob):
@@ -393,21 +371,18 @@ class Tree:
         # TODO: If directory is already on disk, validate it
         #       (once) before assuming it's correct - could
         #       have been half-built and aborted before.
-        fspath = os.fspath(_cas_dir("tree", cas.sig(self)))
+        fspath = cas.object_fspath(cas.sig(self), "tree")
         if os.path.exists(fspath):
             # assume it's valid
             return fspath
         else:
+            assert "blob" not in fspath
             os.makedirs(fspath)
             fsentries = {k: v.__fspath__() for (k, v) in self.items()}
-            try:
-                for k in self._entries:
-                    util.makelink(
-                        fsentries[k], os.path.join(fspath, k),
-                    )
-            except:
-                shutil.rmtree(fspath, ignore_errors=True)
-                raise
+            for k in self._entries:
+                util.makelink(
+                    fsentries[k], os.path.join(fspath, k),
+                )
             return fspath
 
     def write_copy(self, path, *, clobber=True, makedirs=False):
@@ -424,6 +399,7 @@ class Tree:
         assert path.root in (Root.ABS, Root.OUT, Root.GEN)
         try:
             if makedirs:
+                assert "blob" not in os.fspath(path)
                 os.makedirs(path, exist_ok=True)
             else:
                 os.mkdir(path)
@@ -441,14 +417,24 @@ class Tree:
         """
         return Path(self, rel)
 
-    def __getitem__(self, name):
+    def __getitem__(self, rel):
         """
         Get a subtree of this tree.
 
             tree / "foo" - relative path inside the same tree
             tree["foo"] or tree.get("foo") - standalone subtree
+
+            tree[""] == just returns the tree itself
+            tree["a/b"] is the same as tree["a"]["b"]
+
+        Raises FileNotFoundError if the element does not exist.
         """
-        return self._entries[name]
+        out = self
+        for part in rel.split("/"):
+            if not isinstance(out, Tree) or part not in out._entries:
+                raise FileNotFoundError(f"{cas.sig(self)}/{rel}")
+            out = out._entries[part]
+        return out
 
     def get(self, name, default=None):
         return self._entries.get(name, default)
@@ -461,3 +447,16 @@ class Tree:
         Return a tree containing a subset of items from this tree.
         """
         return Tree({name: self[name] for name in names})
+
+
+def _rmtree(path):
+    path = os.fspath(path)
+    try:
+        os.remove(path)
+    except PermissionError:
+        os.chmod(path, stat.S_IWUSR)
+        os.remove(path)
+    except IsADirectoryError:
+        for name in os.listdir(path):
+            _rmtree(os.path.join(path, name))
+        os.rmdir(path)

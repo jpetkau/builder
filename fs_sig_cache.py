@@ -2,90 +2,86 @@
 Get hash of contents of files, with caching so we don't spend too much time
 re-hashing large files over and over.
 """
-from hashlib import sha256 as hash_algo
-import dbm
+import dbm, os, stat, struct
 
 
-_db = None
-def _get_db():
-    global _db
-    if _db is None:
-        _db = dbm.open(dbpath, "c")
-    return _db
+class RaceError(RuntimeError):
+    ...
 
-class SigCache:
-    def __init__(self, dbpath):
+
+class FsSigCache:
+    """
+    Maintain a cache of the content hashes of filesystem files
+
+    Each cache entry stores the (inode, size, ctime, mtime) of the file
+    that was hashed; if all of those match, we re-use the old hash on
+    subsequent calls.
+    """
+
+    def __init__(self, dbpath, hasher):
         # dbm only has "dumbdbm" on Windows which is *really* slow,
         # single-process exclusive, and just generally bad.
         # TODO: use a better dbm module; semidbm?
-        self._cache = dbm.open(dbpath, "c")
+        self._db = dbm.open(dbpath, "c")
+        self._hasher = hasher
 
-    def hash(path):
-
-    def close():
-
-
-def statkey(path, st) -> bytes:
-    """Convert the result of os.stat to a key"""
-
-    return b"".join([
-        os.fsencode(os.path.abspath(path)),
-        bytes(str(st.st_ctime), "utf8"),
-        bytes(str(st.st_mtime), "utf8"),
-        bytes(str(st.st_size), "utf8"),
-        bytes(str(st.st_ino), "utf8")])
-
-
-def hash_bytes(data: bytes, flags: int = 0) -> Sig:
-    if len(data) <= 31:
-        h = bytes([len(data) + 1 | flags]) + data
-    else:
-        h = bytearray(hashlib.sha256(data).digest())
-        h[0] = HFLAG_LONG | flags | (h[0] & 63)
-        h = bytes(h)
-    return Sig(hash=h)
-
-
-def hash_byte_stream(f, flags: int = 0) -> Sig:
-    BLOCKSIZE = 65536
-    data = f.read(BLOCKSIZE)
-    if len(data) < BLOCKSIZE:
-        return hash_bytes(data, flags)
-    hasher = hashlib.sha256()
-    while data:
-        hasher.update(data)
-        data = f.read(BLOCKSIZE)
-    h = bytearray(hasher.digest())
-    h[0] = HFLAG_LONG | flags | (h[0] & HFLAG_MASK)
-    h = bytes(h)
-    return Sig(hash=h)
-
-
-# Return a hash of the contents of the file at the given path.
-# Will try to re-use a cached value of the hash if possible.
-#
-# A hash will be reused if the size, ctime, mtime, and inode
-# are all unchanged from an older hash of the same path.
-#
-# Caller can pass in `st` if they have it (e.g. from scandir)
-# to save an extra stat() call.
-def hash_contents(path, st=None) -> bytes:
-    if st is None:
-        try:
+    # Return a hash of the contents of the file at the given path.
+    # Will try to re-use a cached value of the hash if possible.
+    #
+    # A hash will be reused if the size, ctime, mtime, and inode
+    # are all unchanged from a stored hash of the same path.
+    #
+    # Caller can pass in `st` if they have it to save an extra
+    # stat() call.
+    #
+    # Note that on Windows, scandir's stat() is incorrect:
+    # - it does not observe modifications to a hard-linked file
+    #   via a different path
+    # - inode is 0
+    #
+    # But we really want to support scandir because it's *much*
+    # faster for checking that a large tree is unchanged.
+    def hash(self, path, st=None) -> bytes:
+        path = bytes(os.path.abspath(path), "utf8")
+        if st is None:
             st = os.stat(path)
-        except FileNotFoundError:
-            return NOT_FOUND
+        assert isinstance(st, os.stat_result)
+        if stat.S_ISDIR(st.st_mode):
+            raise IsADirectoryError("attempt to hash contents of a directory")
 
-    if stat.S_ISDIR(st.st_mode):
-        raise NotImplementedError("not sure yet")
+        key = _st_key(st)
+        old = self._db.get(path, None)
+        if old and old[:_ST_KEY_SIZE] == key:
+            return old[_ST_KEY_SIZE:]
 
-    key = statkey(path, stat)
-    h = _get_db().get(key, None):
-    if h:
+        # have to do heavier work now so get a real stat
+        if not st.st_ino:
+            st = os.stat(path)
+        h = self._hasher(path)
+        st2 = os.stat(path)
+
+        # check that file wasn't modified while we hashed it
+        if st != st2:
+            raise RaceError(f"file was modified while hashing: {st} -> {st2}")
+        self._db[path] = _st_key(st) + h
         return h
 
-    # file was modified; update its hash
-    with open(path, "rb") as f:
-        h = hash_byte_stream(f)
-    _db[key] = h
-    return h
+    def close(self):
+        self._db.close()
+
+
+# return bytes containing parts of st that we consider relevant
+def _st_key(st):
+    return struct.pack("<4Q", st.st_ino, st.st_size, st.st_ctime_ns, st.st_mtime_ns)
+
+
+def _st_key_match(st, key):
+    # match as best we can for the st from stat()
+    stk = _st_key(st)
+    if st.st_ino:
+        return stk == key
+    else:
+        return stk[4:] == key[4:]
+
+
+_ST_KEY_SIZE = 16

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import unittest
-import cas
+import cas, config
 
 __ALLOW_GLOBAL_REFS__ = True
 
@@ -108,6 +108,9 @@ cases = [
 
 
 class SigTest(unittest.TestCase):
+    def setUp(self):
+        config.init()
+
     def test_prims(self):
         self.assertEqual(cas.sig(b"").hash, b"\x01")
         self.assertEqual(cas.sig(b"foo").hash, b"\x04foo")

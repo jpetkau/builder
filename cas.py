@@ -1,4 +1,9 @@
 """
+TODO: Move CasDB into fs_sig_cache and give them a better name.
+- That module then deals exclusively with bytes <-> file system.
+- This module then defines the hashing and serialization algos and provides
+the CAS interface.
+
 Content addressable store
 =========================
 
@@ -6,84 +11,80 @@ Content addressable store
 
 This implements a content-addressable object store.
 
-For 'blobs' types, the hash is an actual hash of the bits. For all other
-types, the hash is made by converting the object to a state tuple
-`(type, obj1, obj2, ...)`, concatenating the hashes of all the subobjects,
-and hashing that.
+For 'bytes' types, the hash is an actual hash of the bits. For all other types,
+the hash is made by converting the object to a state tuple `(type, obj1, obj2,
+...)`, concatenating the hashes of all the subobjects, and hashing that.
 
-Can we have values which we know the hash for, but not the rest?
-- Yes: that's how e.g. memoized outputs are represented
-- So the value cache needs to be able to trace references (or use refcounting) to avoid killing things we need
-- We could flag values in the cache as, "parts known to exist" / "parts may be missing / parts known to be missing".
-- Anyway for now, assume it's an error if parts are missing.
+This structure means:
+- We could lazily decode an object, though that isn't done yet.
+- We can trace references for garbage collection without decoding the objects,
+  just following hashes.
 
 
-To fix
-------
-Right now this doesn't actually distinguish hashing from serialization.
-If you hash something, you can use that handle to get the object back.
-That ain't right! Often we know we are *aren't* going to want the object
-back.
+FS hash cache
+-------------
+To avoid re-hashing large input files over and over, we keep a db of file
+hsahes.
 
-Fairly easy fix in principle, just have separate sig() and store() methods.
-Possibly inefficient in practice since we'd often end up doing both?
+
+Mode bits (+x)
+--------------
+Logically, the CAS store doesn't care about mode bits on files (st_mode). The
+hash is only of the contents.
+
+But we want to be able to hand out (read-only) paths to blobs, and clients might
+need those with +x set or not.
+
+So: `store_file()` and `blob_fspath()` take mode bits, and store the file at a
+different path for different modes.
+
+The cas still doesn't *track* modes; this just makes it possible for a caller
+that *does* track modes (like fs.py with Blob vs. XBlob) to get files with
+desired mode bits without incurring extra copies.
 
 
 Mutable objects
 ---------------
-It would be really nice if we could reliably ensure immutability.
-Unfortunately Python makes this hard.
+It would be really nice if we could reliably ensure immutability. Unfortunately
+Python makes this hard.
 
 Basically just try not to mutate hashed things or you will be sad.
 
 
-Encoding types in hashed values
--------------------------------
-This is basically the same serializtion problem we have with e.g. pickle().
-How do we name types? What does it mean for a type to be the same?
-
-- If the type field deserializes to bytes, it represents a builtin.
-  b"i" for int, b"s" for str, etc.
-
-- Maybe even use pickle's special methods
-
 Hashing function objects
 ------------------------
-We need to be able to hash function objects for comparisons. So
-ideally this would be a hash on the expression tree, normalized
-as much as possible to find sharing.
+We need to be able to hash function objects for comparisons. So ideally this
+would be a hash on the expression tree, normalized as much as possible to find
+sharing.
 
-- Hashing by name? No, because we can do a new build with a new function with the same name.
-- Hashing by name, plus bit hashes of all source files that might have influenced that name?
+- Hashing by name? No, because we can do a new build with a new function with
+  the same name.
+- Hashing by name, plus bit hashes of all source files that might have
+  influenced that name?
   - works, but over-conservative
 - Hashing by bytecode and hashes of referenced objects?
   - should work, unfortunately sensitive to Python optimization level.
   - can handle partially-evaluated awaitables and generators, that's cool.
   - expression tree would be better
   - `inspect.getclosurevars()` tells you actual global refs, also captures,
-    nice. [But not really: if f() defines g() that accesses stuff, g's refs
-    are not visible.
-  - but fixable:
-        f.__globals__ - globals dict
-        f.__globals__["__builtins__"].__dict__ - builtins dict
-        f.__code__ - code object
-            .co_code - bytecode
-            .co_names - referenced globals and builtins
-            .co_consts - consts, including sub-code objects
-            .co_freevars - names of vars from outer scopes
-            .co_cellvars - names of vars used by inner scopes
-        f.__closure__ - tuple of cells to outer scopes
-            [].cell_contents - closed-over value, ValueError if uninitialized
+    nice. [But not really: if f() defines g() that accesses stuff, g's refs are
+    not visible.
+  - but fixable: f.__globals__ - globals dict
+        f.__globals__["__builtins__"].__dict__ - builtins dict f.__code__ - code
+        object .co_code - bytecode .co_names - referenced globals and builtins
+        .co_consts - consts, including sub-code objects .co_freevars - names of
+        vars from outer scopes .co_cellvars - names of vars used by inner scopes
+        f.__closure__ - tuple of cells to outer scopes [].cell_contents -
+        closed-over value, ValueError if uninitialized
 
 
-Probably not a good idea to deserialize function or class definitions
-even if it's possible. But we do want to be able to restore *instances*
-of user-defined types.
+Probably not a good idea to deserialize function or class definitions even if
+it's possible. But we do want to be able to restore *instances* of user-defined
+types.
 
-Assuming the contents match, does it matter if the definitions differ?
-But could hash the definition, and then for
-deserialization, do a broader globals search and then only accept the
-global if the definitions match?
+Assuming the contents match, does it matter if the definitions differ? But could
+hash the definition, and then for deserialization, do a broader globals search
+and then only accept the global if the definitions match?
 
 
 Problems
@@ -98,15 +99,15 @@ Object identity: you can write Python code like
         else:
             do_that()
 
-But I don't want to make every list different because that would suck.
-You must write your code as if objects never have identity.
-- Possible way to enforce this: since we're hashing lists on function
-  entry to check memoization, could also intern a canonical instance at
-  that time? But Python's weak refs are dumb so might be hard.
+But I don't want to make every list different because that would suck. You must
+write your code as if objects never have identity.
+- Possible way to enforce this: since we're hashing lists on function entry to
+  check memoization, could also intern a canonical instance at that time? But
+  Python's weak refs are dumb so might be hard.
 
-Ah don't want to do that anyway. It's too hard to avoid mutating things
-in python, will be constant source of bugs. Just have to do extra hashing
-on mutable types. Wait for non-Python version for efficiency.
+Ah don't want to do that anyway. It's too hard to avoid mutating things in
+python, will be constant source of bugs. Just have to do extra hashing on
+mutable types. Wait for non-Python version for efficiency.
 
 Limitations
 -----------
@@ -114,16 +115,15 @@ Limitations
 storing hashed values:
 - first serialize the object to a bit string
 - subobjects can be represented by hashes in that bit string
-- hash of object is hash of serialized string
-but also:
+- hash of object is hash of serialized string but also:
 - hash of a string of 0..31 bytes is length followed by those bytes.
-- so Sig.bits(b: bytes)==b if len(b) <= 31
-deser() is stict here, fully loading recursive objects.
+- so Sig.bits(b: bytes)==b if len(b) <= 31 deser() is stict here, fully loading
+  recursive objects.
 
 For GC:
 - uppercase type codes are all types that contain references.
-- for these types, the body is exactly a list of references
-  concatenated together.
+- for these types, the body is exactly a list of references concatenated
+  together.
 
 Variation
 =========
@@ -131,16 +131,14 @@ Variation
   1. byte string not containing references
   2. tuple of N references to other objects
 - Then the typed hashers just need to decide which to return
-- Fetching can actually get a whole tree of tuples of bytes without looking up types
+- Fetching can actually get a whole tree of tuples of bytes without looking up
+  types
 - Still need to encode types like 'list' etc. somehow
 - Useful?
 
-    1. Map from arbitrary types to nested tuples of bytes
-    bytes -> bytes
-    str -> (b's', utf8)
-    list -> (b'l', obj1, obj2, ...)
-    tuple -> (b't', obj1, obj2, ...)
-    global -> (b'g', module, name)
+    1. Map from arbitrary types to nested tuples of bytes bytes -> bytes str ->
+       (b's', utf8) list -> (b'l', obj1, obj2, ...) tuple -> (b't', obj1, obj2,
+       ...) global -> (b'g', module, name)
     2. Hash encodes difference between 'bytes' and any other type.
 
 Getting raw bytes objects
@@ -152,20 +150,21 @@ Getting raw bytes objects
 
 Python is stupid
 ================
-- list/dict can't be the target of a weakref, nor can you add slots to them,
-  nor can they be keys in dictionaries. So how do make a table that tracks
-  their hashes?
-- could make a table from id->hash, but since there are no weakrefs, this
-  keeps the objects alive. Sucky.
-- could make a table from id->hash that *doesn't* keep the objects alive. How
-  to detect if it's invalid when we get some random new object with the same id?
+- list/dict can't be the target of a weakref, nor can you add slots to them, nor
+  can they be keys in dictionaries. So how do make a table that tracks their
+  hashes?
+- could make a table from id->hash, but since there are no weakrefs, this keeps
+  the objects alive. Sucky.
+- could make a table from id->hash that *doesn't* keep the objects alive. How to
+  detect if it's invalid when we get some random new object with the same id?
   answer: we can't.
 - could wrap everything everywhere in user-defined types. Eew.
-- could keep the objects alive, but occasionally scan for objects with refcount==1
+- could keep the objects alive, but occasionally scan for objects with
+  refcount==1
 """
 from typing import List
-import dbm, hashlib, logging, os, sys, types
-import all_globals, context, util
+import dbm, hashlib, logging, os, shutil, stat, sys, types
+import all_globals, config, fs_sig_cache, util
 
 
 logger = logging.getLogger(__name__)
@@ -175,17 +174,64 @@ HFLAG_COMPOUND = 64
 HFLAG_MASK = 63
 HASH_SIZE = 32
 
+_cas_db = None
+_cas_root = None
 
-_hash_store = None
 
+class CasDB:
+    def __init__(self, cas_root):
+        self._db = dbm.open(os.path.join(cas_root, "cas_db"), "c")
+        self._cache = fs_sig_cache.FsSigCache(
+            os.path.join(cas_root, "fs_sig_db"), hasher=_hash_file
+        )
 
-def hash_store():
-    global _hash_store
-    if _hash_store is None:
-        dir = context.config["cas_root"]
-        os.makedirs(dir, exist_ok=True)
-        _hash_store = dbm.open(os.path.join(dir, "cas_db"), "c")
-    return _hash_store
+    def close(self):
+        self._db.close()
+        self._cache.close()
+
+    def __setitem__(self, h, data):
+        """
+        Store raw byte contents of the given h.
+        """
+        assert isinstance(h, bytes)
+        assert isinstance(data, bytes)
+        db = self._db
+        if (h[0] & HFLAG_LONG) and h not in db:
+            db[h] = data
+        else:
+            # data encoded in h or already stored, nothing to do
+            ...
+
+        # TODO: can't store in a file here because we don't know the mode,
+        # but should check if file exists. Doing a stat() call every time
+        # we store some bytes would be expensive, though, so need an in-memory
+        # cache.
+        """
+            # store blobs in files since we usually need them there anyway
+            p = _blob_fspath(sig)
+            if os.path.isfile(p):
+                return
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(data)
+        """
+
+    def __getitem__(self, h):
+        n = h[0]
+        if n & HFLAG_LONG:
+            # stored in cache
+            assert len(h) == HASH_SIZE, h
+            return self._db[h]
+        else:
+            # short string is encoded in the hash itself
+            assert (n & HFLAG_MASK) == len(h)
+            return h[1:]
+
+    def __contains__(self, h):
+        return (h[0] & HFLAG_LONG) == 0 or h in self._db
+
+    def file_hash(self, path, *, st=None) -> bytes:
+        return self._cache.hash(path, st)
 
 
 class Sig:
@@ -209,15 +255,6 @@ class Sig:
 
     def __hash__(self):
         return self.hash.__hash__()
-
-    @staticmethod
-    def bits(b: bytes) -> "Sig":
-        if len(b) >= HASH_SIZE:
-            out = hashlib.sha256(b).digest()
-            out = bytes([out[0] | HFLAG_LONG]) + out[1:]
-            return Sig(hash=out)
-        else:
-            return Sig(hash=bytes([len(b) + 1]) + b)
 
     def object(self):
         """
@@ -251,29 +288,61 @@ class Sig:
         """
         Get the uparsed bit string corresponding to a hash
         """
-        h = self.hash
-        n = h[0]
-        if n & HFLAG_LONG:
-            # stored in cache
-            assert len(h) == HASH_SIZE, h
-            return hash_store()[h]
-        else:
-            # short string is encoded in the hash itself
-            n &= HFLAG_MASK
-            assert n == len(h)
-            return h[1:]
+        try:
+            return _cas_db[self.hash]
+        except KeyError:
+            # maybe it's in a file?
+            if self.is_bytes():
+                p = self.get_fspath(kind="blob")
+                if not os.path.exists(p):
+                    p = self.get_fspath(kind="xblob")
+                if os.path.exists(p):
+                    with open(p, "rb") as f:
+                        return f.read()
+            raise
 
-    def get_path(self):
+    # return path where blob or tree with the given sig should be materialized,
+    # relative to cas root
+    def get_relpath(self, *, kind=None, st_mode=None):
+        if kind is None and st_mode is None:
+            raise ValueError(
+                "either kind or st_mode must be specified for object_fspath"
+            )
+
+        if st_mode:
+            if stat.S_ISDIR(st_mode):
+                mkind = "tree"
+            elif stat.S_IXUSR & st_mode:
+                mkind = "xblob"
+            else:
+                mkind = "blob"
+            # validate that st_mode and kind match
+            if kind is not None and kind != mkind:
+                raise ValueError(
+                    f"wrong kind {kind} for st_mode 0{st_mode:o}: should be {mkind}"
+                )
+            kind = mkind
+
+        if (kind == "tree") == (self.is_bytes()):
+            raise ValueError(
+                f"wrong kind {kind} for {self} (is_bytes={self.is_bytes()})"
+            )
+
+        s = self.hash.hex()
+        return "/".join((kind, s[:2], s[2:]))
+
+    def get_fspath(self, *, kind=None, st_mode=None):
         """
         Get a path of a file containing to this hash's object, if available.
 
         Requires that this hash represents a bytes type.
 
-        Returns None if the contents are not available in a file (e.g.
-        they're stored in a DB or memory or whatever.)
+        Returns None if `create` is False and the contents are not available in
+        a file (e.g. they're stored in a DB or memory or whatever.)
         """
-        assert self.is_bytes()
-        return None
+        return os.path.normpath(
+            os.path.join(_cas_root, self.get_relpath(kind=kind, st_mode=st_mode))
+        )
 
 
 class WithSig:
@@ -309,7 +378,7 @@ def sig(x, store=False):
     except AttributeError:
         s = None
     else:
-        if s and (not store or s.is_short() or s.hash in hash_store()):
+        if s and (not store or s.hash in _cas_db):
             return s
 
     if type(x) is bytes:
@@ -321,8 +390,8 @@ def sig(x, store=False):
         assert type(parts) is tuple
         b, h = _hcat(sig(key, store), *[sig(p, store) for p in parts])
 
-    if store and (h.hash[0] & HFLAG_LONG):
-        hash_store()[h.hash] = b
+    if store:
+        _cas_db[h.hash] = b
 
     assert s is None or s == h
     return h
@@ -668,10 +737,41 @@ def hash_byte_stream(f, flags: int = 0) -> Sig:
         data = f.read(BLOCKSIZE)
     h = bytearray(hasher.digest())
     h[0] = HFLAG_LONG | flags | (h[0] & HFLAG_MASK)
-    h = bytes(h)
-    return Sig(hash=h)
+    return Sig(hash=bytes(h))
 
 
-def hash_file_contents(fspath: str) -> bytes:
+# raw hasher
+def _hash_file(fspath) -> bytes:
     with open(fspath, "rb") as f:
-        return hash_byte_stream(f)
+        return hash_byte_stream(f).hash
+
+
+# equivalent to store(read(file)), but does a copy instead of read/write
+def store_file(path, st=None) -> Sig:
+    path = os.fspath(path)
+    if st is None:
+        st = os.stat(path)
+    sig = Sig(hash=_cas_db.file_hash(path, st=st))
+    dst = sig.get_fspath(st_mode=st.st_mode)
+    if not os.path.exists(dst):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(path, dst)
+    return sig
+
+
+def checkFileSig(path, expected):
+    h = _hash_file(path)
+    if h != expected.hash:
+        raise RuntimeError(f"hash mismatch in file {path}")
+    return expected
+
+
+@config.oninit
+def init(cas_root, **_):
+    global _cas_root
+    global _cas_db
+
+    os.makedirs(cas_root, exist_ok=True)
+    _cas_root = cas_root
+    _cas_db = CasDB(cas_root)
+    return _cas_db

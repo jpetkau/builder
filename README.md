@@ -76,6 +76,11 @@ This is the same scheme git uses for storing objects; the only difference
 is the actual hash algorithm (sha2 vs. sha1) and some details of encoding,
 so that we can hash and serialize arbitrary objects.
 
+### Where blobs get stored
+
+- Non-blob objects and some blobs are stored in a dbm database.
+- Blobs that came from files can be stored directly as files, instead of requiring the bytes to be read into memory and then serialized out again.
+
 
 Dependency tracking
 -------------------

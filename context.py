@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
-import contextlib
+import contextlib, os
 
-config = {}
+# default config for development / debugging build
+# should do something smarter by default, maybe search from up current dir
+# for a special file?
+config = {
+    "cas_root": os.path.abspath(os.path.join(__file__, "../build-files/cas")),
+    "out_root": os.path.abspath(os.path.join(__file__, "../build-files/out")),
+    "gen_root": os.path.abspath(os.path.join(__file__, "../build-files/gen")),
+    "src_root": os.path.abspath(os.path.join(__file__, "../test_data")),
+}
 
 
 def init_config(**cfg):

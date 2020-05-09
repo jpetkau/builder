@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 
 import os, unittest
-import cas, context, memo
-
-
-cfg = dict(cas_root=os.path.abspath(os.path.join(__file__, "../build-files/cas")))
+import cas, config, memo
 
 
 @memo.memoize
@@ -29,8 +26,10 @@ def f4():
 
 
 class MemoTest(unittest.TestCase):
+    def setUp(self):
+        config.init()
+
     def test_memo(self):
-        context.init_config(**cfg)
         self.assertEqual(cas.sig(f2), cas.sig(f3))
         self.assertEqual(f1(10), 10)
         self.assertEqual(memo.get(f1.__wrapped__, 10), 10)
