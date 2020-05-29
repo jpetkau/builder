@@ -78,33 +78,38 @@ Python statements can force a value early:
     List(x for x in thing) -- this works
 """
 import dbm, logging, os
-import cas, context, util
+import cas, config, context, util
 
 
 logger = logging.getLogger(__name__)
 
 
 _memo_store = None
+_trace = None  # list of memo checks for unit tests
 
 
-def memo_store():
+def set_trace(obj=None):
+    global _trace
+    _trace = obj
+
+
+@config.oninit
+def init(cas_root, **_):
     global _memo_store
-    if _memo_store is None:
-        dir = context.config["cas_root"]
-        os.makedirs(dir, exist_ok=True)
-        _memo_store = dbm.open(os.path.join(dir, "memo_db"), "c")
+    os.makedirs(cas_root, exist_ok=True)
+    _memo_store = dbm.open(os.path.join(cas_root, "memo_db"), "c")
     return _memo_store
 
 
 def put_memo(arg_sig, v_sig):
     assert isinstance(arg_sig, cas.Sig)
     assert isinstance(v_sig, cas.Sig)
-    logger.info("_memo_store[%s] = %s", arg_sig, v_sig)
-    memo_store()[arg_sig.hash] = v_sig.hash
+    logger.debug("_memo_store[%s] = %s", arg_sig, v_sig)
+    _memo_store[arg_sig.hash] = v_sig.hash
 
 
 def get_memo(arg_sig):
-    h = memo_store().get(arg_sig.hash)
+    h = _memo_store.get(arg_sig.hash)
     if h is None:
         return None
     return cas.Sig(hash=h)
@@ -137,21 +142,35 @@ class memoize:
     def __sig__(self):
         return cas.sig(self._func)
 
+    def __repr__(self):
+        return f"{self._func.__name__}:{cas.sig(self._func)}"
+
     def __call__(self, *args, **kwargs):
         f = self._func
         arg_sig = cas.sig((self, args, kwargs))
         res_sig = get_memo(arg_sig)
         logger.debug("in memo for %s, arg_sig=%s, res_sig=%s", f, arg_sig, res_sig)
+        logger.debug("  self.sig=%s", cas.sig(self))
+        logger.debug("     f.sig=%s", cas.sig(f))
+        logger.debug("  args.sig=%s", [cas.sig(a) for a in args])
+        logger.debug("kwargs.sig=%s", cas.sig(kwargs))
+        logger.debug("      args=%s", args)
         if res_sig is None:
+            if _trace is not None:
+                _trace.append(("miss", f.__name__, arg_sig, None))
             with context.options(current_call_hash=arg_sig):
-                logger.info(
+                logger.debug(
                     f"memo calling {f}: no memo for sig {arg_sig} of {(self, args, kwargs)}"
                 )
                 res = f(*args, **kwargs)
             res_sig = cas.store(res)
             put_memo(arg_sig, res_sig)
+            if _trace is not None:
+                _trace.append(("store", f.__name__, arg_sig, res_sig))
             return res
         else:
+            if _trace is not None:
+                _trace.append(("hit", f.__name__, arg_sig, res_sig))
             return res_sig.object()
 
         assert sig_value is None or isinstance(sig_value, cas.Sig)

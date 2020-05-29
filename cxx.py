@@ -38,15 +38,17 @@ def repflag(f, iterable):
 # @memo.memoize_with_deps
 @memo.memoize
 def compile1(src, include_dirs, cflags=()):
-    print(f"compile1: src={os.fspath(src)}", file=sys.stderr)
     include_dirs = util.merge_lists(include_dirs)
     oname = util.with_ext(src.basename(), ".o")
     dname = util.with_ext(src.basename(), ".d")
     incflags = repflag("-I", include_dirs)
     res = run_tool(
-        "clang++", "-c", "-o", oname, "-MM", "-MF", dname, src, *incflags, *cflags
+        "clang++", "-c", "-o", oname, "-MMD", "-MF", dname, src, *incflags, *cflags
     )
-    # record_cxx_deps(res.tree / dname)
+    # memo.fs_deps(src, *include_dirs)
+    # - but for blobs (or anything we had to call stat on), should make dep when
+    #   path is first constructed, unless you're careful not to.
+    # - so wrapping something like 'stat' would work pretty well
     return Struct(**res, obj=res.tree / oname)
 
 
@@ -66,7 +68,6 @@ def lib(name, srcs, include_dirs, cflags=()):
 # defined for the 'primary' output file.
 @memo.memoize
 def binary(name, *, srcs, include_dirs=[], libs=[]):
-    print(f"binary: srcs={srcs}", file=sys.stderr)
     include_dirs = util.merge_lists(include_dirs, *[lib.include_dirs for lib in libs])
     objs = compile(srcs, include_dirs=include_dirs)
     bin = run_tool(

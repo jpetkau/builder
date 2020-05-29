@@ -111,7 +111,7 @@ copied. So the mutable-fs case is just disabling one optimization we might be do
 
 """
 import enum, logging, os, posixpath, secrets, shutil, stat
-import cas, context, util
+import cas, config, util
 from util import imdict
 
 
@@ -129,13 +129,13 @@ class Root(enum.Enum):
     SRC = "src_root"  # A path from the source root
 
     def __str__(self):
-        return f"{self.value}"
+        return f"{{{self.value}}}"
 
     def __fspath__(self):
         if self is Root.ABS:
             return ""
         else:
-            return context.config[self.value]
+            return config.config[self.value]
 
 
 class Path:
@@ -157,6 +157,9 @@ class Path:
 
     def __init__(self, root: Root, rel=""):
         assert isinstance(root, Root) or isinstance(root, Tree)
+        if rel == ".":
+            rel = ""
+        assert not (rel.startswith("./") or rel.startswith("../") or rel == "..")
         if root is Root.ABS:
             assert os.path.isabs(rel), rel
         else:
@@ -171,13 +174,16 @@ class Path:
         return os.path.normpath(os.path.join(self.root, self._rel))
 
     def __repr__(self):
-        return f"{cas.sig(self.root)}/{self._rel}"
+        return f"{self.root}/{self._rel}"
 
     def __truediv__(self, rel):
         if self.root is Root.ABS:
             return Path(self.root, os.path.normpath(os.path.join(self._rel, rel)))
         else:
-            return Path(self.root, posixpath.normpath(posixpath.join(self._rel, rel)))
+            rrel = posixpath.normpath(posixpath.join(self._rel, rel))
+            if rrel == self._rel:
+                return self
+            return Path(self.root, rrel)
 
     def __ser__(self):
         if self.root is Root.GEN:
@@ -200,10 +206,9 @@ class Path:
     def __hash__(self):
         return hash((type(self), self.root, self._rel))
 
-    def tree(self, *, st=None):
+    def contents(self, *, st=None):
         """
-        Return a Tree (or Blob) representing the current contents of the filesystem
-        at this path.
+        Return a Tree or Blob storing current contents of the filesystem at this path.
 
         Raises FileNotFoundError if there is no file at this path.
 
@@ -216,9 +221,12 @@ class Path:
             st = os.stat(self)
         if stat.S_ISDIR(st.st_mode):
             entries = sorted(os.scandir(self), key=lambda p: p.name)
-            return Tree({e.name: (self / e.name).tree(st=e.stat()) for e in entries})
+            return Tree(
+                {e.name: (self / e.name).contents(st=e.stat()) for e in entries}
+            )
         else:
             # this path points to a blob
+            # todo: should not need to store the file if it's under src
             sig = cas.store_file(self, st)
             if st.st_mode & stat.S_IXUSR:
                 return XBlob(content_sig=sig)
@@ -278,9 +286,9 @@ def make_output_dir():
         try:
             os.makedirs(parent, exist_ok=True)
             os.mkdir(p)
+            return p
         except FileExistsError:
-            continue
-        return p
+            pass
 
 
 class Blob:
@@ -311,7 +319,7 @@ class Blob:
         self.content_sig = content_sig
 
     def __ser__(self):
-        return self.content_sig.hash
+        return (self.content_sig.hash,)  # TODO: should use WithSig to quote for gc
 
     @classmethod
     def __deser__(cls, cshash):
@@ -347,6 +355,12 @@ class Blob:
             return False
         return self.content_sig == other.content_sig
 
+    def __repr__(self):
+        return f"{{{type(self).__name__} {self.content_sig}}}"
+
+    def dumps(self):
+        return repr(self)
+
 
 class XBlob(Blob):
     """Blob that sets executable bit when materialized"""
@@ -355,13 +369,17 @@ class XBlob(Blob):
 
 
 class Tree:
+    _ser_fields = ("_entries",)
+
     def __init__(self, entries):
         # entries: dict of (name, Blob|Tree)
         if entries:
             for (k, v) in entries.items():
                 assert type(k) is str
                 assert isinstance(v, Blob) or isinstance(v, Tree)
-        self._entries = imdict(entries)
+        if type(entries) is not imdict:
+            entries = imdict(entries)
+        self._entries = entries
 
     @util.lazy_attr("_fspath", None)
     def __fspath__(self):
@@ -371,12 +389,11 @@ class Tree:
         # TODO: If directory is already on disk, validate it
         #       (once) before assuming it's correct - could
         #       have been half-built and aborted before.
-        fspath = cas.object_fspath(cas.sig(self), "tree")
+        fspath = cas.sig(self).get_fspath(kind="tree")
         if os.path.exists(fspath):
             # assume it's valid
             return fspath
         else:
-            assert "blob" not in fspath
             os.makedirs(fspath)
             fsentries = {k: v.__fspath__() for (k, v) in self.items()}
             for k in self._entries:
@@ -448,6 +465,13 @@ class Tree:
         """
         return Tree({name: self[name] for name in names})
 
+    def __repr__(self):
+        # return f"{{tree {cas.sig(self).hash.hex()[:12]}}}"
+        return f"{{tree {self._entries}}}"
+
+    def dumps(self):
+        d = {k: v.dumps() for (k, v) in self._entries.items()}
+
 
 def _rmtree(path):
     path = os.fspath(path)
@@ -460,3 +484,10 @@ def _rmtree(path):
         for name in os.listdir(path):
             _rmtree(os.path.join(path, name))
         os.rmdir(path)
+
+
+def src_tree_for(buildfile):
+    dir, name = os.path.split(os.path.abspath(buildfile))
+    assert name == "BUILD.py"
+    reldir = os.path.relpath(config.config["src_root"], dir)
+    return (src_root / reldir).contents()

@@ -6,39 +6,46 @@ import util
 # should do something smarter by default, maybe search from up current dir
 # for a special file?
 _default_config = {
-    "cas_root": os.path.abspath(os.path.join(__file__, "../build-files/cas")),
-    "out_root": os.path.abspath(os.path.join(__file__, "../build-files/out")),
-    "gen_root": os.path.abspath(os.path.join(__file__, "../build-files/gen")),
+    "db_root": os.path.abspath(os.path.join(__file__, "../build-files")),
+    "cas_root": "{db_root}/cas",
+    "out_root": "{db_root}/out",
+    "gen_root": "{db_root}/gen",
     "src_root": os.path.abspath(os.path.join(__file__, "../test_data")),
 }
 config = {}
 
 _initialized = False
-_oninit = []
-_ondeinit = []
+_on_init = []  # list of initializers to call on init
+_on_uninit = []  # list of objects to close() on uninit
 
 
 def oninit(f):
-    _oninit.append(f)
+    _on_init.append(f)
     if _initialized:
-        _ondeinit.append(f(**config))
+        # already initialized; run init immediately
+        _on_uninit.append(f(**config))
     return f
 
 
 # this is stupid
 def init(**cfg):
+    uninit()
+
     global _initialized
-
-    if _initialized:
-        for x in _ondeinit:
-            x.close()
-        _ondeinit.clear()
-
     _initialized = True
-    if not cfg:
-        cfg = _default_config
 
     config.clear()
+    config.update(_default_config)
     config.update(cfg)
-    for f in _oninit:
-        _ondeinit.append(f(**cfg))
+    for k in config:
+        config[k] = config[k].format(**config)
+    for f in _on_init:
+        _on_uninit.append(f(**config))
+
+
+def uninit():
+    while _on_uninit:
+        x = _on_uninit.pop()
+        x.close()
+    global _initialized
+    _initialized = False

@@ -49,6 +49,8 @@ del hidden4
 
 
 class Thing:
+    _ser_fields = ...
+
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
 

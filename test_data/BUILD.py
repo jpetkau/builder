@@ -1,30 +1,42 @@
-import fs
-import cxx
+import commands, cxx, memo, fs
 
-# TODO: there should be a tree object corresponding to each BUILD file;
-# paths in the build file are relative to that tree.
-#
-# Could have a global named `src` or `here` which is that tree.
-# Need to get fancy with import machinery first.
+
+loc = fs.src_tree_for(__file__)
+
+
+@memo.memoize
+def trivial():
+    return 1
+
+
+@memo.memoize
+def trivial2():
+    return trivial() + trivial()
+
+
+def echo():
+    return commands.run_tool("echo", "hi").stdout.bytes().rstrip()
+
+
+@memo.memoize
+def echo_m():
+    return commands.run_tool("echo", "hi").stdout.bytes().rstrip()
+
+
+def copy_stuff():
+    d1 = commands.run_tool("cp", loc / "somefile.txt", "out.txt")
+    d2 = commands.run_tool("cp", loc / "somefile.txt", "out.txt")
+    d3 = commands.run_tool("cat", d1.tree / "out.txt", d2.tree / "out.txt")
+    return d3.stdout.bytes()
 
 
 def lib1():
-    return cxx.lib(
-        "lib1",
-        srcs=([fs.src_root / "lib1/lib1.cpp"]),
-        include_dirs=[fs.src_root / "lib1"],
-    )
+    return cxx.lib("lib1", srcs=([loc / "lib1/lib1.cpp"]), include_dirs=[loc / "lib1"],)
 
 
 def lib2():
-    return cxx.lib(
-        "lib2",
-        srcs=[fs.src_root / "lib2/lib2.cpp"],
-        include_dirs=[fs.src_root / "lib2"],
-    )
+    return cxx.lib("lib2", srcs=[loc / "lib2/lib2.cpp"], include_dirs=[loc / "lib2"],)
 
 
 def main():
-    return cxx.binary(
-        "main", srcs=[fs.src_root / "bin/main.cpp"], libs=[lib1(), lib2()]
-    )
+    return cxx.binary("main", srcs=[loc / "bin/main.cpp"], libs=[lib1(), lib2()])

@@ -727,3 +727,361 @@ Mutation
 
 Disallow it initially. Skylark-style limited mutation should be ok but
 will require lots of thought that I don't want to think right now.
+
+..
+
+Deps tracking API
+-----------------
+The underlying logic is pretty simple, but mapping to mutable FS operations
+and command invocations in a way that isn't error prone is tricky. Could use
+a FUSE filesystem to make it better, but assuming we don't do that:
+
+Underlying model
+----------------
+Asking for a tracked dep is like an algebraic effect; it could be rewritten as returning a read request plus a continuation, followed by the continuation being called with the result of that request.
+
+So also could be viewed as a Python 'yield' or 'await', although we (probably?) don't want to implement it that way.
+
+Is there any advantage in explicitly implementing via yield or await? Yes:
+- Actual memo machinery is just normal pure fn stuff, no back channels.
+- Indicating serial vs. parallel deps is done via standard Python utils
+
+Disadvantages:
+- Feels very clunky
+- Since the leaf routines use async, *everything* will end up marked async.
+
+Could probably do just as well with normal fn calls, just keeping the async/yield model in mind.
+
+...
+
+So with the yield / effect view in mind: what does dep-tracking look like?
+
+- There does need to be some type which represents the "effect sans handler", e.g. an fs tree with not-yet-known contents.
+- When we have a fully known tree: first apply simple memoization, then rewritten.
+
+i.e.
+
+    f : x:Whatever t1:Tree t2:Tree -> int
+    f = let a = t1 'a'
+            b = t2 'b'
+        in g a b
+
+check if that is memoized as-is; assuming not, call rewritten version:
+
+    f : x:Whatever ot1:OpaqueTree ot2:OpaqueTree -> int
+    f = ReadReq ot1 'a' \a ->
+        ReadReq ot2 'b' \b ->
+        g a b
+
+The opaque arguments must be identified by position, so that the outgoing 
+calls look different even if the same value is passed for t1 and t2.
+
+When we don't have a fully-known tree (e.g. starting with a source dir), what do we do?
+
+- Currently have types Path / Blob / Tree. Blob and Tree act like values.
+
+Tree or Blob: when passed as arg, already introduces a dep on entire contents
+
+src path:
+- acts like a string
+- introduces a dep on just that path (stat, not contents of dir)
+- use contents() to convert to tree if dep on the whole tree is preferred
+- buck etc.: default is tree constructed from explicit includes etc., middle ground. Could do the same. Autodeps are always for performance, never correctness.
+
+OpaqueTree
+----------
+Not sure if I really need this or not?
+- It represents a tree but with not-yet-known contents
+
+- Might be redundant with Path or Tree? Certainly they can do all the same
+  operations, so difference is just one of intent for memoization. Path
+  represents just the path itself (semantically not much more than a string);
+  OpaqueTree means the same thing a Tree but is lazier about storing contents.
+
+Definitely shouldn't merge this with Tree, because Tree is a much simpler
+concept. It's just a data structure, even simpler than json.
+
+Might make sense to merge with Path, since otherwise Path is very error-prone
+to use. Also Path is mostly used as a relatively high-level object.
+
+Difference from Path comes with hashing, but since the question is all about
+exactly what hashing means, and that's not 100% clear for Path, ok.
+
+- Still want to have the (Tree,string) kind of Path. It's fine as-is. But maybe that becomes the only kind?
+
+Ok, I think Path just needs a few more knobs:
+- A source or gen path can be rooted under another path (i.e. three components: general category, tree root under that general category, path into tree.)
+- It must be possible to distinguish paths at different arg positions. Probably need to be compatible with some general mechanism for this. What happens exactly if we can't? - call 1 with (A,A) records a bunch of uses of A; now what should call 2 with (A,B) do? - might be able to just distinguish these cases at entry to memo and then have them be different. Or not.
+
+So, new Path type:
+- logically it models a pair of functions (stat: str->Stat, get: str->(blob|list[str]|None)).
+  Can also define a subtree function:
+
+        subtree(parent, rel) = {
+            stat: \s -> parent.stat(join(s, rel))
+            get: \s -> parent.get(join(s, rel))
+        }
+
+- root can be a tree or somewhere under src_root. Not sure about gen.
+- doesn't require store, read-only. (Maybe ReadPath vs. WritePath is the relevant distinction).
+- can compute hash of tree under this path if desired
+- relevant kinds of access: stat result (including missing file) and read
+
+Ok, work on the general function form:
+
+what I call:
+
+    foo(1, 2, [3, 4, (5, {'x': magic_tree_object})]) ?
+
+We need to identify the magic_tree_object all the way inside x there.
+
+But! Fortunately we have to dig into the arg anyway for hashing.
+So what does hash(arg) look like for such an arg?
+
+- we have to be able to look at (arg) a know that it's not fully hashed yet
+- ideally we could efficiently substitute canonical values for placeholders,
+- magic_tree_object hashes to some kind of special positional placeholder
+- when we *use* the object, we need to know that we used "object at arg position X" rather than the object itself. Ugh.
+- in Python probably can't do that exactly. But as long as objects have different identities, we can instead just hash the f(x,x) vs. f(x,y) cases differently and go by identity from there.
+
+i.e.:
+- sig computation when entering the memo creates a list of traced object IDs.
+- when an access is recorded, we can track it appropriately.
+
+Ok that works but maybe there's a simpler way (analogy to effect systems again):
+- there is only one instance of each traceable object
+- logically in fact there's just *one* traceable object, a bundle of those instances.
+yeah that works?
+
+so `src_tree` is actually `lambda *args: read("src_tree", *args)`?
+
+...
+Maybe this is all too clever. Consider how it works in buck:
+
+- libraries export a relatively small tree of include files
+- these are given as inputs to tools, sometimes relative to higher-level dirs
+- if using say `-I` high in the source tree, use the simple known list of include sets to filter the tree; can pass the normal path in for `-I`, and just check after the fact that the tool didn't access anything it hadn't declared.
+
+In practice this is better because it's less magical. Dependencies are declared in comprehensibly-sized chunks, errors are legible, magic is not required.
+
+Implementation?
+- memoized functions can't just take source path strings as inputs, they have to convert to trees first.
+- could auto-convert or error out (former more convenient, latter less likely to produce accidental giant slow builds.)
+
+How do we prevent it? (Strings are ok in general after all).
+- function to produce a *new* tree from a source path can't be called inside memoized context?
+
+This would have to be disallowed:
+
+    def my_c_lib():
+        return c_lib(srcs=["foo.c"], headers=Tree("include/"))
+
+In favor of:
+
+    headers=Tree("include/")
+
+    def my_c_lib():
+        return c_lib(srcs=["foo.c"], headers=headers)
+
+But we want to be memoizing build file processing too; this would forbid it, no?
+
+
+Implementing autodeps
+---------------------
+- At memo time: find relevant objects, replace with placeholders "special object #1, #2, ..."
+- Can do that with _get_sig() on those objects
+- When those objects are accessed, they add dep to top memo on stack
+
+Is that always right?
+- need to add all the way up stack? That would suck.
+- but it is necessary: the top level really does depend on a zillion files.
+- so there needs to be some way to merge things back together for checking
+
+    def top_level_fn():
+        a=big_1()
+        b=big_2()
+        c=big_3()
+
+- so top_level_fn ends up depending on 1M files
+- even the dependency list is pretty big
+- really is better to lump things up a little, e.g. make it depend on 1000 trees of 1000 files.
+Going to rerun it almost every time anyway.
+
+If we do that:
+- build files get as an input a *Tree* of their associated files, which they can *explicitly* depend on.
+- special dep-list stuff only applies to cc files that need it
+
+    def load_build_file(path):
+        bftree = make_source_tree(path) # not memoized but can be special-cased
+        funcs = load_module(bftree["BUILD"]) # memoized
+        return funcs
+
+    problem: there might be super high-level build files; don't want them to depend on the world
+        - could copy blaze and exclude subtrees with their own build files
+        - maybe it is ok to run all build files? but I really don't wanna.
+          - caching build files requires serializing functions? better to avoid that
+            - not if we say that cas lookup failure for a memo result makes us rerun the memo
+
+ok how bad is this -
+- we have a giant set of file deps under the top-level target
+- but if we represent it as a tree, most leaves will be the same as in subtargets
+- ok, how do we represent it as a tree?
+  - we just use a tree as the data structure for a set of paths and it just works. sweetzorz.
+
+So there does need to be a `FancyTree` type which covers other FS operations:
+- explicit file-not-found indication
+- explicit "did I do a listdir here?" repr
+  - what about globs? e.g. someone looking for `*.h` doesn't care about new cpp file
+  - don't worry about that yet
+- not sure if it makes sense to have a single `Tree` with more features or two kinds
+- trees can be merged, have to be careful about globs though
+- important to keep the mapping to/from pure functions in mind to avoid screwups.
+
+merging trees:
+
+    def merge(t1, t2):
+        if t1 == t2:
+            return t1
+        if not isinstance(t1, TreeSlice) or not isinstance(t2, TreeSlice):
+            raise BadMerge
+
+        if t1.is_full:
+            # check that t2 is compatible
+
+
+        for k in set(t1.keys()) + set(t2.keys()):
+            if k not in t1:
+                if t1.is_full:
+                    expect(k is None, BadMerge)
+                else:
+                    out[k] = t2[k]
+            elif k not in t2:
+                if t2.is_full:
+                    expect(k is None, BadMerge)
+                else:
+                    out[k] = t1[k]
+            else:
+                out[k] = merge(t1[k], t2[k])
+
+        return TreeSlice(out, is_full = t1.is_full or t2.is_full)
+
+this handles everything except globs. How do those work?
+- just one flag, "did I do a listdir". If it's set, list of non-None entries
+is complete, and no Nones are required.
+
+    def rel_path_to_treeslice(rel, contents):
+        if rel:
+            parts = rel.split("/")
+            for part in reversed(parts):
+                contents = TreeSlice({part: contents}, is_full=False)
+        return contents
+
+    def path_contents_to_treeslice(path):
+        contents = path.contents(allow_missing=True)
+        if contents is None:
+            while path.parent().is_missing():
+                path = path.parent()
+            assert path.contents(allow_missing=True) is None
+        return rel_path_to_treeslice(path.rel, contents)
+
+Ok this can be made to work, but has significant complexity. But hopefully the
+memo correctness falls out of lower-level mechanisms.
+
+Globbing could be fancier, e.g. could track not just 'is_full' but which globs were done.
+Then it's ok to combine with any files that don't match those globs. Probably not a win
+though. Unless it is.
+
+"fileset" might be a better name than "treeslice". Or "lazytree"?
+
+Pure fn version?
+
+    compile(srcname, srctree, [inctree1, inctree2])
+
+srctree, inctree1, inctree2 are empty lazytrees with fspaths
+    each corresponds to a function:
+    
+        subpath,get? -> isnone|isblob|isxblob|isdir if get? is False
+                     -> None|Blob|XBlob|[names] if get? is True
+
+the y_memo stuff wants to track an abstract set of keys at which fn was evaluated, and values produced by that. If compiler was looking for "a/b/c/f.h" and found it in inctree2, what does that correspond to? Maybe it's better *not* to work with this explicit tree structure, and just compress a set with lots of common prefixes?
+
+
+srcname can be just a string
+compiler tells us that output depended on some list of absolute paths
+we can map those to somewhere under srctree, inctree1, inctree2 - this produces three non-empty lazytrees
+
+anyway, should look like:
+
+    inctree1: !exist a/b/c/f.h
+    - which I can't actually represent if (say) b is missing.
+    - maybe the right thing to record is `search(t1,t2,"a/b/c/f.h") -> t2/a/b/c/f.h` so we can track the semantics more directly?
+
+how would that work?
+
+    def f(g, h):
+        compile(g, h)
+
+logically, compile() should have been:
+
+    def f(g, h):
+        compile(\s -> search(s, [g, h]))
+
+where search() is something the memo system can do itself
+
+anyway this is all getting horrifically tricky. Is there a better way?
+back to just regular memoization, no yoneda magic
+for the compiler case:
+- memoize based on the full tree
+- changed one irrelevant file? memoization will fail
+- compile code has special logic to deal with that explicitly
+
+    @memo
+    def compile(src, srctree, [inctrees]):
+        callsig = (compile, src) # = memo.top() or something
+        out = check_y_deps(callsig, lambda i: )
+        if out:
+            return out
+
+        cc_out = run_tool(["cc", etc])
+        deps = cc_out.tree["deps.d"]
+        real_deps = deps_to_named_file_set(deps, src, srctree, [inctrees])
+        record_y_deps(callsig, real_deps)
+
+well that's a whole lot simpler. Doesn't work in as many cases: higher-level
+code will still call compile() when nothing's really changed, but that's probably
+better than having it depend on a million things.
+
+Big advantage: if you do nothing, it's still correct, just rebuilds more often.
+
+...
+
+Ergonomics in build files and current location:
+
+- Make 'here' an explicit param. Not unreasonable (e.g. 'self' in Python)
+
+Anything else already involves magic, but maybe not so bad.
+- make 'here' a global, look in bytecode for free names, then treat as argument
+
+If we want to use simple string names for paths, e.g:
+
+    def mylib():
+        return cxx_lib(srcs=["foo.cpp"])
+
+then cxx_lib has to know what tree we're in.
+- cxx_lib could be a parameterized import
+- or mylib() could be implicitly wrapped in a dynamic variable thingy?
+
+Nope:
+
+    def xlib(s):
+        return cxx_lib(srcs=["foo.cpp", s])
+    # <other build file>
+    def mylib():
+        return other_module.xlib("bar.cpp")
+
+Better to use explicit Tree param.
+
+Ok what about implicit global `loc`?
+- problem now is that it's hard to know if it's used or not
+- need to follow global references
+    - actually that's already covered by fn hashing!

@@ -16,7 +16,7 @@ def run_tool(*args, stdin=os.devnull):
     with open(stdin, "rb") as fin, open(stdout, "wb") as fout, open(
         stderr, "wb"
     ) as ferr:
-        logger.info(f"run {strargs}")
+        print(subprocess.list2cmdline(strargs))
         p = subprocess.run(
             strargs, stdin=fin, stdout=fout, stderr=ferr, cwd=odir, check=False
         )
@@ -24,7 +24,9 @@ def run_tool(*args, stdin=os.devnull):
         with open(stderr, "rb") as f:
             p.stderr = f.read()
             print(p.stderr, file=sys.stderr)
-    return util.Struct(tree=odir.tree(), stdout=stdout.blob(), stderr=stderr.blob())
+    return util.Struct(
+        tree=odir.contents(), stdout=stdout.contents(), stderr=stderr.contents()
+    )
 
 
 @memo.memoize

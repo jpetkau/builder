@@ -15,6 +15,9 @@ For 'bytes' types, the hash is an actual hash of the bits. For all other types,
 the hash is made by converting the object to a state tuple `(type, obj1, obj2,
 ...)`, concatenating the hashes of all the subobjects, and hashing that.
 
+One bit of the hash digest is reserved for distinguishing flat `bytes` from
+compound object hashes.
+
 This structure means:
 - We could lazily decode an object, though that isn't done yet.
 - We can trace references for garbage collection without decoding the objects,
@@ -24,7 +27,8 @@ This structure means:
 FS hash cache
 -------------
 To avoid re-hashing large input files over and over, we keep a db of file
-hsahes.
+hashes. This is a separate module that effectively just makes `stat()` very
+fast.
 
 
 Mode bits (+x)
@@ -49,6 +53,10 @@ It would be really nice if we could reliably ensure immutability. Unfortunately
 Python makes this hard.
 
 Basically just try not to mutate hashed things or you will be sad.
+
+We could freeze objects as much as possible when memozing (have to define
+frozenlist, frozendict, 
+
 
 
 Hashing function objects
@@ -248,7 +256,7 @@ class Sig:
         self.hash = hash
 
     def __repr__(self):
-        return "{" + self.hash.hex() + "}"
+        return "{" + self.hash.hex()[:12] + "}"
 
     def __eq__(self, other):
         return self is other or (type(other) is Sig and self.hash == other.hash)
@@ -369,17 +377,16 @@ def store(x):
 # @util.trace
 def sig(x, store=False):
     """
-    Return the signature of some Python object
+    Return the signature of some Python object.
+
+    If store is True, then the object will be retrievable from
+    its signature later.
     """
 
     # reuse existing sig if possible
-    try:
-        s = x.__sig__
-    except AttributeError:
-        s = None
-    else:
-        if s and (not store or s.hash in _cas_db):
-            return s
+    s = getattr(x, "__sig__", None)
+    if s is not None and (not store or s.hash in _cas_db):
+        return s
 
     if type(x) is bytes:
         b, h = x, hash_bytes(x)
@@ -530,7 +537,12 @@ The 'type' part will typically be found as a global for deser.
 
 def ser_instance(v):
     assert not isinstance(v, types.ModuleType)
-    return ser_dict(v.__dict__)
+    fields = getattr(v, "_ser_fields", None)
+    if fields is Ellipsis:
+        return ser_dict(v.__dict__)
+    elif fields is not None:
+        return ser_dict({k: getattr(v, k) for k in fields})
+    raise RuntimeError(f"no ser instance for {type(v)}")
 
 
 def deser_instance(ty, ks, vs):
@@ -622,7 +634,9 @@ def ser_function(f):
     if f.__closure__:
         cells = tuple(c.cell_contents for c in f.__closure__)
     names = _code_names(f.__code__)
-    return (cells, f.__code__, *(_lookup_global(name, f.__globals__) for name in names))
+    r = (cells, f.__code__, *(_lookup_global(name, f.__globals__) for name in names))
+    logger.debug(f"ser_function {f.__name__} {r}")
+    return r
 
 
 def ser_code(code):

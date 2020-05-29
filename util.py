@@ -130,6 +130,8 @@ class imdict(dict):
 
 # Hashable misc. struct class until I decide how to do it properly
 class Struct:
+    _ser_fields = ...
+
     def __init__(self, **data):
         self.__dict__.update(data)
 
