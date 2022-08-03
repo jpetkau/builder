@@ -2,12 +2,20 @@
 """
 Main entry point
 """
-import logging, os, types
+import logging, os, types, sys
 import fs, config, context
 import importer
 
 
 src_root = os.path.abspath(os.path.join(__file__, "../test_data"))
+
+
+class DebugFinder:
+    @classmethod
+    def find_spec(cls, name, path, target=None):
+        print(f"Importing {name!r}")
+        return None
+sys.meta_path.insert(0, DebugFinder)
 
 
 if __name__ == "__main__":

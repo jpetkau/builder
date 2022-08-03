@@ -1085,3 +1085,12 @@ Ok what about implicit global `loc`?
 - problem now is that it's hard to know if it's used or not
 - need to follow global references
     - actually that's already covered by fn hashing!
+
+
+Source control integration
+--------------------------
+Super important to be able to reference other packages, and have the build system fetch and build them out of tree.
+
+*Possibly* these references can be git subrepo links. That would be nice in a couple of ways:
+- (some) people already know how to use it
+- How to use a patched subrepo is obvious (if the subrepo is materialized, just use it as found). Though this gets tricky if the same subrepo is referenced from multiple places - need to explicitly say what we want in such cases.

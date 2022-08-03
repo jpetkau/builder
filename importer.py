@@ -9,11 +9,12 @@ Uh, why do I need this at all, vs. just writing
     loc = tree_for(__FILE__) ?
 
 """
-import os, types
+import os, sys, types
 import fs
 
 
 def importer(name, globals=None, locals=None, fromlist=(), level=0):
+    print(f"importer {name!r} fromlist={fromlist!r} level={level!r}")
     parts = [*filter(None, name.split("."))]
     if level == 0 and parts[0] != "root":
         # normal import
@@ -21,14 +22,17 @@ def importer(name, globals=None, locals=None, fromlist=(), level=0):
 
     if level > 0:
         # relative import
-        pparts = [*filter(None, globals.__name__.split("."))]
-        if len(pparts) < level - 1:
+        print(f"  __name__={globals['__name__']}")
+        pparts = [*filter(None, globals["__name__"].split("."))]
+        print(f"  pparts={pparts}")
+        if len(pparts) < level:
             raise ModuleNotFoundError
-        parts = pparts[-level - 1 :] + parts
+        parts = pparts[-level:] + parts
     name = ".".join(parts)
+    print(f"importing {name}")
 
-    if name in _buildfiles:
-        return _buildfiles[name]
+    if name in sys.modules:
+        return sys.modules[name]
 
     if parts[0] != "root":
         raise ImportError("imported build files must start with 'root': {name}")
@@ -41,10 +45,11 @@ def importer(name, globals=None, locals=None, fromlist=(), level=0):
     except FileNotFoundError:
         raise ModuleNotFoundError(f"no build file at {srcpath}")
 
-    _buildfiles[name] = m = types.ModuleType(name)
+    m = types.ModuleType(name)
     m.__builtins__ = _buildfile_builtins
     m.__file__ = os.fspath(srcpath)
     m.loc = bdir.contents()
+    sys.modules[name] = m
     try:
         exec(src, m.__dict__, m.__dict__)
     except:
@@ -54,4 +59,3 @@ def importer(name, globals=None, locals=None, fromlist=(), level=0):
 
 
 _buildfile_builtins = {**__builtins__, "__import__": importer}
-_buildfiles = {}

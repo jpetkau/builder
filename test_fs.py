@@ -20,6 +20,7 @@ class PathTest(unittest.TestCase):
         self.assertEqual(str(p / ".."), "{src_root}/x/y")
         self.assertEqual(str(p / "../w"), "{src_root}/x/y/w")
         self.assertEqual(str(p / "../../.."), "{src_root}/")
+        self.assertEqual(str(p / "../../../w"), "{src_root}/w")
 
 
 class BlobTest(unittest.TestCase):
@@ -50,6 +51,13 @@ class TreeTest(unittest.TestCase):
         self.assertEqual(cas.sig(p1), cas.sig(p2))
         self.assertEqual(cas.sig(p1.contents()), cas.sig(p2.contents()))
         self.assertEqual(cas.sig(p1.contents()), cas.sig(t["lib1"]))
+
+    def test_nested(self):
+        b0 = fs.Blob(bytes=b'')
+        b1 = fs.Blob(bytes=HELLO)
+        t0 = fs.Tree({"empty": b0, "hello": b1})
+        t1 = fs.Tree({"world": b1, "sub1": t0, "sub2": t0})
+        self.assertEqual(os.fspath(t1), os.path.normpath(fs.cas_root / "tree/ff/a9429c489720aada4c4d9ea2675b9b0c72f82bf1400ce424a34b04453a01eb"))
 
     def test_blob_path(self):
         t = fs.src_root.contents()

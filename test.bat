@@ -1,1 +1,1 @@
-for %%t in (test_*.py) do %%t
+for %%t in (test_*.py) do py %%t

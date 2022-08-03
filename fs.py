@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 TODO:
-- It will remain a pain using 'Path' objects instead of plain pathnames when defining commands to run. Maybe allow pathnames in more places, and check that they're in safe places before using?
+- It will remain a pain using 'Path' objects instead of plain pathnames when
+  defining commands to run. Maybe allow pathnames in more places, and check
+  that they're in safe places before using?
 
 filesystem:
 
-* mapping from pure view to real FS is via a shim layer with aproppriate
+* mapping from pure view to real FS is via a shim layer with appropriate
   concessions to reality.
 
 * file content hash database is maintained separately - cache hashes with name,
@@ -277,8 +279,9 @@ def _cas_dir(kind, content_sig):
 
 
 def make_output_dir():
-    # Create a temporary directory for running a tool
-    # and return a path to it
+    """
+    Creates a temporary directory for running a tool and return a path to it.
+    """
     while True:
         h = secrets.token_hex(6)
         parent = gen_root / h[:2]
@@ -302,8 +305,9 @@ class Blob:
     that.
 
     The derived class XBlob is a blob that sets the x-bit on write.
-    (TODO: But it does *not* return a file with the x-bit from __fspath__,
-    which it should. Need more integration with cas for that.)
+
+    TODO: currently this always stores the data in memory as `bytes`.
+    Should avoid doing that for large files.
     """
 
     _mode = 0o444
@@ -369,6 +373,19 @@ class XBlob(Blob):
 
 
 class Tree:
+    """
+    Tree represents an immutable heirarchy of named blobs.
+
+    A tree can be materialized in the filesystem on demand, and implements the
+    __fspath__ protocol to make this convenient. Trees are always materialized
+    inside the CAS folder. Subtrees are stored as symlinks, so the actual
+    physical representation is always only one level deep.
+
+    Potentially-mutable filesystem folders are _not_ trees, although it's
+    always possible to create a tree by scanning their contents. Instead the
+    `Path` class represents such locations (and can also refer to a path within
+    a tree).
+    """
     _ser_fields = ("_entries",)
 
     def __init__(self, entries):

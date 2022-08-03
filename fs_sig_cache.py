@@ -61,8 +61,8 @@ class FsSigCache:
         st2 = os.stat(path)
 
         # check that file wasn't modified while we hashed it
-        if st != st2:
-            raise RaceError(f"file was modified while hashing: {st} -> {st2}")
+        if not _st_key_match(st2, key):
+            raise RaceError(f"file was modified while hashing: {st} -> {st2} or {key} -> {_st_key(st2)}")
         self._db[path] = _st_key(st) + h
         return h
 
@@ -70,18 +70,21 @@ class FsSigCache:
         self._db.close()
 
 
-# return bytes containing parts of st that we consider relevant
+# return bytes containing parts of st that we consider relevant. Note
+# that on Windows, dir scan returns st.st_ino=0, so we use that when
+# we can but ignore it when we can't.
 def _st_key(st):
-    return struct.pack("<4Q", st.st_ino, st.st_size, st.st_ctime_ns, st.st_mtime_ns)
+    key = struct.pack("<4Q", st.st_ino, st.st_size, st.st_ctime_ns, st.st_mtime_ns)
+    assert len(key) == _ST_KEY_SIZE
+    return key
 
 
 def _st_key_match(st, key):
     # match as best we can for the st from stat()
     stk = _st_key(st)
-    if st.st_ino:
-        return stk == key
-    else:
-        return stk[4:] == key[4:]
+    if stk == key:
+        return True
+    return stk[8:] == key[8:] and (stk[:8]==b'\0\0\0\0\0\0\0\0' or key[:8]==b'\0\0\0\0\0\0\0\0')
 
 
-_ST_KEY_SIZE = 16
+_ST_KEY_SIZE = 32
