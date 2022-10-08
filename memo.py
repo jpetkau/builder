@@ -20,29 +20,8 @@ Ok, so original motivation for laziness was 'target output file':
 
 ...
 
-`Lazy` represents a future-style view of a lazy value.
-
-e.g. for `bool` it is a value that will eventually be true or false, but may not
-be resolved yet.
-
-Internally it stores a thunk which should be evaluated to get the value.
-
-what can you do with a value?
-- access properties and methods. In general, this will just immediately return a
-  lazy wrapper.
-- if it's possible to immediately resolve a value (or barf), then that is what
-  happens.
-- force it. This fully resolves value to a non-lazy head type.
-- get a strong hash of it (which may require resolving it)
-- store the hash (and its children) in the cache
-
-It is possible to partially force values. For example, if you have a pair (a,b),
-you might want to force just 'a'.
-
 Errors
 ======
-Values act like futures, so if evaluating a value throws an exception, that
-exception is stored and re-thrown by anyone who tries to force the value.
 
 Three kinds of errors:
 1. build errors, e.g. syntax error in C++ code. These are cached like anything
@@ -52,7 +31,7 @@ Three kinds of errors:
    but don't cache. They may or may not abort a build.
 3. panics: build system itself had an error and can't continue.
 
-Can we have values which we know the hash for, but not the rest?
+Can we have values which we know the hash for, but not the contents?
 - Yes: that's how e.g. memoized outputs are represented
 - So the value cache needs to be able to trace references (or use refcounting)
   to avoid killing things we need
@@ -63,19 +42,9 @@ Can we have values which we know the hash for, but not the rest?
 Encoding types in hashed values
 -------------------------------
 This is basically the same serializtion problem we have with e.g. pickle(). How
-do we name types? What does it mean for a type to be the same?
+do we name types? What does it mean for a type to be the "same"?
 - At least for v1: like pickle, have a limited set of primitives with fixed
   encoding.
-
-Limitations
------------
-
-Python statements can force a value early:
-
-    [x for x in thing] -- depends on length of thing
-    (x for x in thing) -- doesn't, but we can't do len() any more either.
-    list(x for x in thing) -- only works if we wrap 'list', which may be a bad idea
-    List(x for x in thing) -- this works
 """
 import dbm, logging, os
 import cas, config, context, util

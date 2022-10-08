@@ -1,6 +1,5 @@
 import commands, cxx, memo, fs
 
-
 loc = fs.src_tree_for(__file__)
 
 

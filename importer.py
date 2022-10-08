@@ -14,31 +14,45 @@ import fs
 
 
 def importer(name, globals=None, locals=None, fromlist=(), level=0):
-    print(f"importer {name!r} fromlist={fromlist!r} level={level!r}")
     parts = [*filter(None, name.split("."))]
     if level == 0 and parts[0] != "root":
-        # normal import
+        # normal import: "import os.path"
         return __import__(name, globals, locals, fromlist, level)
 
     if level > 0:
-        # relative import
-        print(f"  __name__={globals['__name__']}")
+        # relative import: "from ..there import that"
+        # globals['__name__'] tells us what it's relative to
         pparts = [*filter(None, globals["__name__"].split("."))]
-        print(f"  pparts={pparts}")
         if len(pparts) < level:
             raise ModuleNotFoundError
         parts = pparts[-level:] + parts
-    name = ".".join(parts)
-    print(f"importing {name}")
-
-    if name in sys.modules:
-        return sys.modules[name]
 
     if parts[0] != "root":
         raise ImportError("imported build files must start with 'root': {name}")
 
+    for i in range(1, len(parts) + 1):
+        name = ".".join(parts[:i])
+        if name in sys.modules:
+            m = sys.modules[name]
+        else:
+            m = do_import(name)
+
+    if fromlist:
+        # import x,y,z from a.b -- populate and return b
+        for tail in fromlist:
+            if not hasattr(m, tail):
+                setattr(m, tail, do_import(name + "." + tail))
+        return m
+    else:
+        # import a.b [as c] -- return a
+        # import .b.c [as d] -- return b?
+        return sys.modules[parts[0]]
+
+def do_import(name):
+    assert name=="root" or name.startswith("root.")
     bdir = fs.src_root / name[5:].replace(".", "/")
     srcpath = bdir / "BUILD.py"
+    print(f"importing {name} from {srcpath}")
     try:
         with open(srcpath, "rb") as f:
             src = f.read()
@@ -53,7 +67,7 @@ def importer(name, globals=None, locals=None, fromlist=(), level=0):
     try:
         exec(src, m.__dict__, m.__dict__)
     except:
-        del _buildfiles[name]
+        del sys.modules[name]
         raise
     return m
 

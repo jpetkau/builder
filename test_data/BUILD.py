@@ -35,13 +35,5 @@ def lib1():
 
 
 def main():
-    # aha: this doesn't play well because it treats our file as a package
-    # e.g. if `root.foo` is the contents of some build file, and so is `root.foo.bar`,
-    # then foo must also be a package.
-    # and we can't tell from __import__ if someone is importing foo for itself or
-    # for its subpackages, so can't separate them either.
-    #
-    # TODO: read up on python loaders and do it right
     from . import lib2
-    print(f"lib2 is {lib2}")
     return cxx.binary("main", srcs=[loc / "bin/main.cpp"], libs=[lib1(), lib2.lib2()])

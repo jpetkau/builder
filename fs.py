@@ -161,7 +161,7 @@ class Path:
         assert isinstance(root, Root) or isinstance(root, Tree)
         if rel == ".":
             rel = ""
-        assert not (rel.startswith("./") or rel.startswith("../") or rel == "..")
+        assert not (rel.startswith("./") or rel.startswith("../") or rel == ".."), rel
         if root is Root.ABS:
             assert os.path.isabs(rel), rel
         else:
@@ -506,5 +506,5 @@ def _rmtree(path):
 def src_tree_for(buildfile):
     dir, name = os.path.split(os.path.abspath(buildfile))
     assert name == "BUILD.py"
-    reldir = os.path.relpath(config.config["src_root"], dir)
+    reldir = os.path.relpath(dir, config.config["src_root"])
     return (src_root / reldir).contents()

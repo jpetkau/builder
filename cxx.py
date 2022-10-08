@@ -68,6 +68,7 @@ def lib(name, srcs, include_dirs, cflags=()):
 # defined for the 'primary' output file.
 @memo.memoize
 def binary(name, *, srcs, include_dirs=[], libs=[]):
+    print(f'actually running cxx.binary name={name}, srcs={srcs}, include_dirs={include_dirs}, libs={libs}')
     include_dirs = util.merge_lists(include_dirs, *[lib.include_dirs for lib in libs])
     objs = compile(srcs, include_dirs=include_dirs)
     bin = run_tool(

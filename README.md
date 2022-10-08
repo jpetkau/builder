@@ -11,6 +11,54 @@ a different foundation.
 
 It could still have a Python-like build syntax like Skylark though.
 
+The Big Idea
+============
+
+
+Functions
+---------
+
+Logically, a "build step" is just a function. You have some inputs (e.g. some
+files and configuration outputs) and some outputs (e.g. one or more files, maybe
+some error messages and a success/failure status.)
+
+So what happens if we just treat it that way? E.g. compiling a file might be:
+
+    my_exe = link(compile_c(fs("src/main.c")))
+
+If we keep all functions pure, then caching outputs is exactly the same thing
+memoizing function results.
+
+Files live on a filesystem, and we generally think of filesystems as this
+inherently mutable environment that programs swim around in. But it is possible
+to look at files in a pure way. For example, consider how Git views files: as a
+content-hashed tree of content-hashed blobs of data.
+
+We can do exactly the same thing: internally, we work with unrooted trees of
+named blobs. There is some work required to interoperate with tools that expect
+to see an actual filesystme
+
+
+Specifying dependency graphs
+----------------------------
+Every build system has some special language for specifiying dependencies and how to build
+outputs from them.
+
+Even when the language is a regular programming language (e.g. Python for
+Buck/Bazel), the actual dependencies are specified in some custom way--e.g. by
+passing a list of target names or similar.
+
+But we already have a different system for specifying dependencies, that everyone knows!
+Consider this code:
+
+    concat(get_path(here), get_filename(there))
+
+The `concat` function has two dependencies: the result of the get_path call, and
+the result of the get_filename call. I.e. the usual "functions with arguments"
+syntax is already defining a sort of dependency graph. Why not use that?
+
+
+
 Plan so far
 -----------
 
@@ -67,19 +115,20 @@ In roughly bottom-to-top order:
 Handling file systems
 ---------------------
 
-The system tries to treat file systems as a content-addressable store as
-much as possible: a 'Blob' is just a sequence of bytes which can be found
-from its hash; a 'Tree' is a list of named entries, each either a Blob
-or a Tree, and also retreivable by its hash.
+The system tries to treat file systems as a content-addressable store as much as
+possible: a 'Blob' is just a sequence of bytes which can be found from its hash;
+a 'Tree' is a list of named entries, each either a Blob or a Tree, and also
+retreivable by its hash.
 
-This is the same scheme git uses for storing objects; the only difference
-is the actual hash algorithm (sha2 vs. sha1) and some details of encoding,
-so that we can hash and serialize arbitrary objects.
+This is the same scheme git uses for storing objects; the only difference is the
+actual hash algorithm (sha2 vs. sha1) and some details of encoding, so that we
+can also hash and serialize non-file objects.
 
 ### Where blobs get stored
 
 - Non-blob objects and some blobs are stored in a dbm database.
-- Blobs that came from files can be stored directly as files, instead of requiring the bytes to be read into memory and then serialized out again.
+- Blobs that came from files can be stored directly as files, instead of
+  requiring the bytes to be read into memory and then serialized out again.
 
 
 Dependency tracking
@@ -94,9 +143,9 @@ This will work, but if source_tree is very large, it won't be useful: changing
 any unrelated file in source_tree will trigger a recompile. We only want to
 recompile if a file actually used by foo.c changes.
 
-A file system then be thought of as a function from a path to the contents of the
-file at that path. To make examples simpler and more general, we'll replace the
-filesystem with an arbitary function.
+A file system then be thought of as a function `fs(path)` from a path to the
+contents of the file at that path. To make examples simpler and more general,
+we'll replace the filesystem with an arbitary function.
 
 I.e., we want to memoize:
 
@@ -436,9 +485,9 @@ and let optimization / program transformation avoid the double eval.
 
 Look at where it comes together:
 
-    def cxx_binary_target(name, srcs, libs):
-        objs = cxx_compile_target(srcs[i] for i in srcs)
-        cxx_link_target(name, objs, libs)
+    def cxx_binary(name, srcs, libs):
+        objs = cxx_compile(srcs[i] for i in srcs)
+        return cxx_link(name, objs, libs)
 
 We need to actually follow the targets to know things like our compile flags.
 Ignoring for now when exactly this happens, what do we need from target?
@@ -888,6 +937,99 @@ But we want to be memoizing build file processing too; this would forbid it, no?
 
 Implementing autodeps
 ---------------------
+
+Consider this call:
+
+    exe = cxx.binary("main", srcs=[loc / "bin/main.cpp"], libs=[lib1(), lib2.lib2()])
+
+The srcs passed in will be `[{tree_of_everything}/main.cpp}]`, so if anything anywhere
+changes, this gets recompiled.
+
+If course that's undesirable.
+
+But if we pass in a tree filtered to `main.cpp` itself, it won't contain any
+header files that `main` might need. We want the tree to exactly match the
+needed headers. How can we do this?
+
+One way:
+
+    def cxx_binary(name, srcs, ...):
+        headers = extract_headers(name, srcs, ...)
+        filtered_srcs = filter_tree(srcs, headers)
+        return run_cxx_tool(name, filtered_srcs, ...)
+
+i.e. we still run extract_headers when anything anywhere changes, but hopefully
+that's fast compared to `run_cxx_tool`. But that's not a great solution.
+
+Instead we make the memoization a bit smarter, so it only considers the part of
+the tree that is actually relevant. How?
+
+- On the first run, we pass in the whole tree (since we don't know what's relevant).
+
+- The compiler produces a .d file with a list of headers used
+  [note that compilers all do this wrong, since they don't put __has_include checks or searched-but-not-found dirs in the .d file! Ignore that for now.]
+
+- `get_headers` is a special sort of memoized thing: it's paired with `set_headers` instead
+of auto-caching, and we promise that whether it's found or not doesn't affect the result.
+
+Now we have a new problem: how does `get_headers` know which of (possibly many) cached
+values to use? It needs to include `main.cpp` in the first lookup key. We could just clobber
+all but the most recent value stored, or we could store many combinations of headers.
+
+Case where this is suboptimal:
+    main.cpp -> a.h -> b.h
+    build; stores [main.cpp=1: a.h=1, b.h=1]
+    modify a.h
+    build; sees a.h changed, recompiles, stores [main.cpp: a.h=2, b.h=1]
+    modify a.h back how it was
+    no longer matches so we do a rebuild when we could pull from cache
+
+Instead:
+
+first build stores `[main.cpp=1: a.h b.h][main.cpp=1 a.h=1 b.h=1: out1`
+
+second build looks up names, looks for `[main.cpp=1 a.h=2 b.h=1]`, doesn't
+find it so rebuilds, stores `[main.cpp=1 a.h=2 b.h=1: out1]`.
+
+Now we have a new problem: what if the change to `a.h` was to include `c.h` instead
+of `b.h`? Second build now wants to store `[main.cpp=1: a.h c.h]` which is inconsistent.
+
+But we can detect and fix this: at least one filename must be common to before/after,
+so we change the two entries to
+
+    [main.cpp=1: a.h] [main.cpp=1 a.h=1: b.h] [main.cpp=1 a.h=1 b.h=1: out1]
+
+and
+
+    [main.cpp=1: a.h] [main.cpp=1 a.h=2: c.h] [main.cpp=1 a.h=2 c.h=1: out2]
+
+With enough rebuilds, we end up with a linked list of headers in the depdb.
+
+(There's a theorem called the Yoneda lemma that proves this is possible in
+general, where the filesystem is replaced by any function.)
+
+How do we actually implement this?
+- cxx_binary isn't necessarily memoized (though that may still speed up nop builds)
+
+    def cxx_binary(name, src, libs, flags):
+        key = (cc_exe, src, libs, flags)
+        hs = get_header_cache(key)
+        if hs:
+            src = filtered_view(src, hs)
+            o = cxx_binary_impl(name, src, libs, flags)
+            update_header_cache(key, o.deps)
+        else:
+            o = cxx_binary_impl(name, src, libs, flags, disable_memo=true)
+            update_header_cache(key, o.deps)
+            store_memo(cxx_binary_impl, name, filtered_view(src), libs, flags)
+
+    @y_memo(arg='src')
+    def cxx_binary(name, src, libs, flags):
+        o = cxx_binary_impl(name, src, libs, flags)
+        return y_filter(o.deps, o)
+
+Implementing autodeps (old)
+---------------------------
 - At memo time: find relevant objects, replace with placeholders "special object #1, #2, ..."
 - Can do that with _get_sig() on those objects
 - When those objects are accessed, they add dep to top memo on stack
@@ -1094,3 +1236,78 @@ Super important to be able to reference other packages, and have the build syste
 *Possibly* these references can be git subrepo links. That would be nice in a couple of ways:
 - (some) people already know how to use it
 - How to use a patched subrepo is obvious (if the subrepo is materialized, just use it as found). Though this gets tricky if the same subrepo is referenced from multiple places - need to explicitly say what we want in such cases.
+
+
+Parallelism
+-----------
+
+In practice, explicit parallelism in Python doesn't work so well. E.g.:
+
+    cxx.binary('name', srcs=['main.cpp'], libs=[lib1(), lib2()])
+
+This will wait until lib1 is finished before starting lib2, even if they should
+be independent.
+
+Best thing is probably to make list literals parallel by default, but that needs
+to wait for a real build language. What can we do in Python?
+
+Ugly alternative 1: lib1() returns some kind of future that isn't fully resolved yet,
+and now we've given up the nice simple evaluation model.
+
+Ugly alternative 2: explicit parallelism in Python, which loses the nice call
+syntax.
+
+    libs = par([lib1, bind(lib2.lib2, arg1, arg2, kwarg1=17])
+
+Ugly alterative 3: back to the futures, but keep our eval model.
+`lib1()` is an ordinary async fn. Caching logic happens on await, not
+on initial call.
+
+    async def my_exe():
+        return cxx.binary(
+            "main",
+            srcs=[loc / "bin/main.cpp"],
+            libs=gather([lib1(), lib2.lib2()]))
+
+Note that `cxx.binary` here knows nothing about async. It *could* though:
+
+    async def cxx_binary(name, srcs, libs):
+        (name, srcs, libs) = await gather_if_async(name, srcs, libs)
+        return cxx_binary_impl(name, srcs, libs)
+
+    @memo.memoize
+    def cxx_binary_impl(name, srcs, libs):
+        ...
+
+And that pattern is simple enough to automate:
+
+    @memo.memoize_and_make_async
+    def cxx_binary(name, srcs, libs):
+        ... # non-async code
+
+Also, such automation can make `cxx_binary()` (and any other annotated fn) start
+its task immediately, so e.g. in `a=await a; b=await b`, we aren't forcing
+sequential evaluation.
+
+It could also do stuff like first check if all the arguments are ready, and if
+the result is in the cache, and if so return it immediately without the overhead
+of creating an async task.
+
+What about in a custom language? Better to just make list literals and arg lists
+parallel, or make everything async like this? If it's mostly a pure language,
+having everything implicitly parallel is fine.
+
+(Looks like there's a rust impl of starlark, nice, maybe start with that).
+
+
+Python importing
+================
+
+In the short term while I'm using CPython, how does importing build files work?
+
+Implemented in `importer.py`.
+
+In imported BUILD.p[y files, we override `__builtins__.__import__`.
+
+It sets up the root BUILD.py file as `root`, and all other BUILD.py files
+as child modules of that.

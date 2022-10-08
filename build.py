@@ -13,9 +13,9 @@ src_root = os.path.abspath(os.path.join(__file__, "../test_data"))
 class DebugFinder:
     @classmethod
     def find_spec(cls, name, path, target=None):
-        print(f"Importing {name!r}")
+        print(f"Debug: importing {name!r}")
         return None
-sys.meta_path.insert(0, DebugFinder)
+#sys.meta_path.insert(0, DebugFinder)
 
 
 if __name__ == "__main__":
